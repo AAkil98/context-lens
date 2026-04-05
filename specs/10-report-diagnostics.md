@@ -77,6 +77,7 @@ Returns the complete diagnostic state of the context-lens instance at the moment
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `schemaVersion` | string | Schema version for this output (cl-spec-011 section 2) |
 | `timestamp` | number | When this snapshot was assembled |
 | `sessionDuration` | number | Milliseconds since instance construction |
 | `latestReport` | QualityReport or null | Most recent quality report from `assess()`. Null if `assess()` has not been called. Structure defined in cl-spec-002 section 9 and cl-spec-007 section 6. |
@@ -89,7 +90,7 @@ Returns the complete diagnostic state of the context-lens instance at the moment
 | `groupCount` | number | Current group count |
 | `evictedCount` | number | Current evicted (but retained) segment count |
 | `taskState` | TaskState | Current task state (cl-spec-004 section 4.4) |
-| `continuityLedger` | ContinuityLedgerEntry[] | Full continuity audit trail (cl-spec-002 section 6) |
+| `continuityLedger` | ContinuityEvent[] | Full continuity audit trail (cl-spec-002 section 6) |
 | `warnings` | Warning[] | Active warnings (provider mismatch, pinned ceiling, late seeding, etc.) |
 
 **Why the full continuity ledger?** cl-spec-002 section 9.5 defines a `ContinuitySummary` on the quality report — aggregates (total evictions, tokens evicted, net loss) plus the 10 most recent events. The diagnostic snapshot provides the **full ledger** for callers who need the complete audit trail: forensic analysis of every eviction, compaction, and restoration in the session. The summary is for quick consumption; the ledger is for deep inspection.
@@ -136,8 +137,16 @@ context-lens retains the **20 most recent quality reports** in a ring buffer. Wh
 | `patternCount` | number | Number of active patterns |
 | `highestSeverity` | Severity or null | Highest active pattern severity |
 | `embeddingMode` | string | `"embeddings"` or `"trigrams"` |
+| `anomalies` | AnomalyFlag[] | Dimensions that changed by > 0.15 since previous report. Empty if none or if first report (section 3.3) |
 
 Each summary is ~200 bytes. 20 entries: ~4KB. Negligible.
+
+**ReportHistorySummary structure:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `reports` | ReportSummary[] | Ring buffer of the last 20 report summaries, newest first |
+| `rollingTrend` | RollingTrend or null | Rolling 5-report trend analysis. Null if fewer than 2 reports |
 
 **Why 20 reports:** Enough to compute meaningful rolling trends (section 3.2) and show the session trajectory. 20 reports at typical assess frequency (every few interactions) covers the recent conversation history without retaining the entire session. The buffer size is a fixed internal parameter, not caller-configurable — tuning it provides no meaningful benefit and adds API complexity.
 
@@ -295,8 +304,8 @@ The session timeline is a unified, chronological log of every significant event 
 |------|---------|--------------|
 | `segmentAdded` | `add()` or `seed()` completes | `{ segmentId, tokenCount, protection, origin }` |
 | `segmentUpdated` | `update()` completes | `{ segmentId, contentChanged: boolean, fieldsChanged: string[] }` |
-| `segmentReplaced` | `replace()` completes | `{ segmentId, oldTokenCount, newTokenCount }` |
-| `segmentCompacted` | `compact()` completes | `{ segmentId, oldTokenCount, newTokenCount, compressionRatio }` |
+| `segmentReplaced` | `replace()` completes | `{ segmentId, previousTokenCount, newTokenCount }` |
+| `segmentCompacted` | `compact()` completes | `{ segmentId, previousTokenCount, newTokenCount, compressionRatio }` |
 | `segmentSplit` | `split()` completes | `{ originalId, childIds: string[], childCount }` |
 | `segmentEvicted` | `evict()` completes | `{ segmentId, tokenCount, protection, evictionCost, reason }` |
 | `segmentRestored` | `restore()` completes | `{ segmentId, tokenCount, fidelity }` |
@@ -314,6 +323,11 @@ The session timeline is a unified, chronological log of every significant event 
 | `embeddingProviderChanged` | `setEmbeddingProvider()` completes | `{ previousMode, newMode, segmentsReembedded }` |
 | `capacityChanged` | `setCapacity()` completes | `{ previousCapacity, newCapacity, newUtilization }` |
 | `budgetViolation` | A Tier 1–4 operation exceeds its budget | `{ operation, selfTime, budgetTarget, segmentCount }` |
+| `customPatternRegistered` | A custom pattern was registered via registerPattern | `{ name, dimensions }` |
+| `stateSnapshotted` | Instance state was serialized via snapshot() | `{ segmentCount, totalTokens }` |
+| `stateRestored` | Instance state was restored via fromSnapshot() | `{ segmentCount, totalTokens }` |
+| `lateSeeding` | Segments were seeded after non-seed segments already existed | `{ seedCount, existingCount }` |
+| `pinnedCeilingWarning` | Pinned tokens exceed the configured ceiling threshold | `{ pinnedTokens, ceiling, utilization }` |
 
 ### 5.3 Timeline Retention
 
@@ -375,7 +389,7 @@ The performance budget (cl-spec-009) defines per-operation timing records with s
 |-------|------|-------------|
 | `hits` | number | Total cache hits since construction |
 | `misses` | number | Total cache misses |
-| `hitRate` | number | hits / (hits + misses). NaN if no lookups. |
+| `hitRate` | number or null | hits / (hits + misses). Null if no lookups have occurred. |
 | `currentEntries` | number | Current number of entries in the cache |
 | `maxEntries` | number | Maximum cache capacity |
 | `utilization` | number | currentEntries / maxEntries |
@@ -525,7 +539,7 @@ Custom patterns appear in both formatting paths. `formatReport` includes custom 
 
 ## 9. Invariants and Constraints
 
-**1. Read-only diagnostics.** `getDiagnostics()` does not mutate instance state, trigger computation, invalidate caches, or call providers. It assembles existing state into a snapshot. This is unconditional — there is no "force refresh" parameter, no implicit assessment trigger. If the caller wants fresh data, they call `assess()` before `getDiagnostics()`.
+**1. Read-only diagnostics.** `getDiagnostics()` does not call segment-mutating methods or configuration-mutating methods. It assembles a snapshot from pre-maintained internal state without triggering quality scoring, pattern detection, or provider calls.
 
 **2. Cheap assembly.** `getDiagnostics()` is a Tier 1 operation (cl-spec-009): < 1 ms regardless of window size. Diagnostic state is maintained incrementally as events occur. Assembly is a read-and-copy operation, not a computation.
 

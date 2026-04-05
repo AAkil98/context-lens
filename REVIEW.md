@@ -146,7 +146,7 @@ Collect all numbered invariants across all specs and verify no pair conflicts.
 | 02 | 20 | #4 empty window, #9 no LLM calls, #15 snapshot isolation |
 | 03 | 16 (10+6) | #1 deterministic, #2 side-effect free, #10 in-budget, #11 name uniqueness, #14 fail-open |
 | 04 | 12 | #1 caller owns task, #3 synchronous invalidation |
-| 05 | 10 | #1 single provider, #5 fallback always available |
+| 05 | 10 | #1 single provider, #7 fallback always available |
 | 06 | 16 | #1 deterministic counting, #7 capacity required |
 | 07 | 8 + cross-spec | #1 snapshot consistency, #2 atomic mutations, #3 deterministic reports, #4 defensive copies |
 | 08 | 12 | #1 read-only consumer, #2 deterministic planning, #3 protection inviolable |
@@ -199,6 +199,84 @@ Verify that every public-facing operation, type, and event mentioned across all 
 - [ ] `planEviction` (spec 08) — verify it's in spec 07.
 - [ ] All 22 events are listed in spec 07 §9.2.
 - [ ] All 12 error types are listed in spec 07 §10.1.
+
+---
+
+## Execution Plan
+
+Three phases: internal consistency (per-spec), cross-cutting analysis (across specs), deliverables (amendments + sign-off).
+
+### Phase 1 — Internal Consistency (Pass 1)
+
+Seven batches in dependency order. Each batch runs parallel review agents (one per spec) checking the Pass 1 checklist. Batches are sequential — findings in foundations may change what we look for in consumers.
+
+| Batch | Specs | Rationale |
+|-------|-------|-----------|
+| B1 | 01 (Segment), 06 (Tokenization) | Foundations. Independent of each other. |
+| B2 | 02 (Quality) | Depends on 01. Central type definitions. |
+| B3 | 03 (Degradation), 04 (Task), 05 (Embedding) | All depend on 02, independent of each other. Amended spec 03 gets extra scrutiny. |
+| B4 | 07 (API Surface) | Integrates 01–06. Most cross-references. Amended. |
+| B5 | 08 (Eviction), 09 (Performance) | Depend on 07, independent of each other. Spec 08 amended. |
+| B6 | 10 (Report & Diagnostics) | Depends on 03, 07, 08. Amended. |
+| B7 | 11 (Schema), 12 (Fleet), 13 (OTel), 14 (Serialization) | Enrichments. Depend on 07/10/11, parallel. |
+
+#### Per-spec agent checklist
+
+- Section references resolve correctly (internal cross-refs)
+- Table fields match prose descriptions
+- Invariant numbering is sequential, no gaps or duplicates
+- TOC matches actual section structure
+- Frontmatter reflects current state (status, revised date, depends_on, tags)
+- Amended specs: amendment integrates cleanly, pre-amendment cross-refs still valid
+
+**Consolidation:** Numbered findings list in `REVIEW_FINDINGS.md`, each tagged with spec and severity. User reviews before Phase 2.
+
+### Phase 2 — Cross-Cutting Analysis (Passes 2–5)
+
+Four focused sweeps. Each uses agents that read targeted sections across multiple specs.
+
+| Sweep | Pass | Focus | Approach |
+|-------|------|-------|----------|
+| S1 | 2 | 8 known type tensions | One agent per tension cluster. 3 parallel batches of 2–3 tensions. Each reads the defining spec section and all consuming spec sections. |
+| S2 | 2 | Remaining ~32 types in the registry | Systematic field verification: definition vs consumption. Batched by dependency layer. |
+| S3 | 3 | 5 cross-spec invariant tensions | One agent per chain: determinism, atomic-vs-fail-open, read-only consumers, snapshot isolation, performance + custom patterns. |
+| S4 | 4–5 | 7 coverage gaps + spec 07 surface audit | Combined sweep — both ask "is anything missing?" |
+
+**Consolidation:** Extended findings list (continuing numbering from Phase 1). Draft type reconciliation table. User resolves ambiguous tensions.
+
+### Phase 3 — Deliverables
+
+1. **Issue list** — final numbered findings (blocker / inconsistency / gap / editorial)
+2. **Type reconciliation table** — authoritative field list for each shared type
+3. **Spec amendments** — applied in dependency order (foundations first) to avoid cascading fixes
+4. **Sign-off** — confirmation that the corpus is internally consistent and ready for implementation specs
+
+### Tracking Format
+
+```
+**R-NNN** [severity] (spec(s))
+Description of finding.
+**Proposed resolution:** What to change and where.
+```
+
+Severity levels:
+
+| Severity | Meaning |
+|----------|---------|
+| **blocker** | Contradictory definitions, broken contracts, impossible to implement as written |
+| **inconsistency** | Field name mismatch, count disagreement, ambiguous authority |
+| **gap** | Missing coverage, undocumented behavior callers would expect |
+| **editorial** | Stale reference, formatting issue, TOC drift |
+
+### User Checkpoints
+
+| After | User decides |
+|-------|-------------|
+| Phase 1 complete | Review findings. Flag false positives. Approve proceeding to cross-cutting analysis. |
+| Phase 2 — S1 (type tensions) | Resolve ambiguous type authority (e.g., which spec owns TaskState?). |
+| Phase 2 — S3 (invariant chains) | Resolve any true invariant conflicts (e.g., atomic failure vs fail-open). |
+| Phase 3 — issue list complete | Approve amendment plan before specs are modified. |
+| Phase 3 — amendments applied | Final sign-off. |
 
 ---
 

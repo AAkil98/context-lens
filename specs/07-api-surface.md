@@ -2,11 +2,11 @@
 id: cl-spec-007
 title: API Surface
 type: design
-status: draft
+status: draft (amended)
 created: 2026-04-02
 revised: 2026-04-04
 authors: [Akil Abderrahim, Claude Opus 4.6]
-tags: [api, public-interface, constructor, configuration, lifecycle, events, errors]
+tags: [api, public-interface, constructor, configuration, lifecycle, events, errors, serialization, snapshot, patterns]
 depends_on: [cl-spec-001, cl-spec-002, cl-spec-003, cl-spec-004, cl-spec-005, cl-spec-006]
 ---
 
@@ -58,7 +58,7 @@ Stateful does not mean persistent. Instance state lives in memory for the sessio
 
 ### API categories
 
-The public API is organized into seven categories:
+The public API is organized into eleven categories:
 
 | Category | Purpose | Key methods |
 |----------|---------|-------------|
@@ -68,9 +68,11 @@ The public API is organized into seven categories:
 | **Task operations** | Manage the current task descriptor | `setTask`, `clearTask`, `getTask`, `getTaskState` |
 | **Quality operations** | Query context quality | `assess`, `getBaseline` |
 | **Pattern registration** | Register custom degradation patterns | `registerPattern` |
-| **Serialization** | Produce schema-conforming output | `toJSON`, `schemas` |
-| **Provider management** | Configure tokenizer and embedding providers | `setTokenizer`, `setEmbeddingProvider` |
-| **Capacity and inspection** | Query window state without scoring | `getCapacity`, `getSegment`, `listSegments`, `getSegmentCount` |
+| **Serialization** | Produce schema-conforming output | `toJSON`, `schemas`, `validate`, `snapshot`, `fromSnapshot` |
+| **Provider management** | Configure tokenizer and embedding providers | `setTokenizer`, `setEmbeddingProvider`, `getTokenizerInfo`, `getEmbeddingProviderInfo` |
+| **Capacity and inspection** | Query window state without scoring | `getCapacity`, `setCapacity`, `getSegment`, `listSegments`, `getSegmentCount`, `getEvictionHistory` |
+| **Diagnostics** | Inspect internal state | `getDiagnostics` |
+| **Eviction planning** | Produce advisory eviction plans | `planEviction` |
 
 An **event system** (section 9) provides lifecycle hooks. An **error model** (section 10) defines failure modes.
 
@@ -154,6 +156,7 @@ Configuration is captured at construction time via defensive copy. The caller's 
 | `hysteresisMargin` | No | — |
 | `tokenCacheSize` | No | — |
 | `embeddingCacheSize` | No | — |
+| `customPatterns` | Append-only | `registerPattern(definition)` |
 
 The immutable fields are set once because changing them mid-session would invalidate state in non-obvious ways. Changing `hysteresisMargin` would alter pattern deactivation behavior retroactively. Changing `suppressedPatterns` would create discontinuities in pattern history. These are session-level decisions that belong at construction time.
 
@@ -532,7 +535,7 @@ Sets or updates the current task descriptor.
 
 **Behavior:**
 1. Validates and normalizes the descriptor (cl-spec-004 section 2.2): whitespace collapse, case-insensitive keyword deduplication, sorted arrays. The normalized descriptor is stored via defensive copy — the caller's object is not retained.
-2. If no current task: classifies as a new task (`UNSET → ACTIVE`).
+2. If no current task: classifies as a new task (`unset → active`).
 3. If a current task exists: compares the new descriptor against the current one (cl-spec-004 section 3) and classifies the transition:
    - **Same task** (no meaningful change): no-op. Returns a transition with `type: "same"`.
    - **Refinement** (similarity > 0.7): invalidates relevance scores. No grace period.
@@ -544,7 +547,7 @@ Sets or updates the current task descriptor.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `type` | `"new"` or `"refinement"` or `"change"` or `"same"` | Classification of the transition. |
+| `type` | `"new"` or `"refinement"` or `"change"` or `"same"` or `"clear"` | Classification of the transition. |
 | `similarity` | number or `null` | Similarity between old and new task descriptions. `null` for new tasks. |
 | `previousTask` | `TaskDescriptor` or `null` | The task that was replaced. `null` for new tasks. |
 
@@ -558,7 +561,7 @@ Sets or updates the current task descriptor.
 clearTask() -> void
 ```
 
-Removes the current task descriptor. Transitions task state to UNSET. All segments receive relevance 1.0 (safe default). The gap pattern is suppressed. Relevance scores are invalidated.
+Removes the current task descriptor. Transitions task state to unset. All segments receive relevance 1.0 (safe default). The gap pattern is suppressed. Relevance scores are invalidated.
 
 If no task is set, this is a no-op.
 
@@ -584,14 +587,20 @@ Returns the full task lifecycle state.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `state` | `"UNSET"` or `"ACTIVE"` | Current lifecycle state. |
-| `current` | `TaskDescriptor` or `null` | Current task descriptor. |
-| `previous` | `TaskDescriptor` or `null` | Previous task descriptor. |
-| `transitionCount` | number | Total number of task transitions in this session. |
-| `lastTransition` | `TaskTransition` or `null` | Most recent transition. |
-| `stale` | boolean | True if 5+ quality reports have been generated without a `setTask` call. |
-| `gracePeriodActive` | boolean | True if within the 2-report grace period after a task change. |
-| `gracePeriodRemaining` | number | Reports remaining in the grace period (0 if not active). |
+| `state` | `"unset"` or `"active"` | Current lifecycle state |
+| `currentTask` | `TaskDescriptor` or `null` | Current task descriptor. Null when unset |
+| `previousTask` | `TaskDescriptor` or `null` | Previous task descriptor. Null if no prior task |
+| `taskSetAt` | number or `null` | Timestamp when current task was set. Null when unset |
+| `transitionCount` | number | Total transitions |
+| `changeCount` | number | Total task changes |
+| `refinementCount` | number | Total refinements |
+| `reportsSinceSet` | number | Reports generated since last setTask |
+| `reportsSinceTransition` | number | Reports since last transition of any type |
+| `lastTransition` | `TaskTransition` or `null` | Most recent transition result (section 5.1) |
+| `stale` | boolean | True when reportsSinceSet >= 5 (cl-spec-004 section 5.3) |
+| `gracePeriodActive` | boolean | Whether grace period is in effect |
+| `gracePeriodRemaining` | number | Reports remaining in grace period (0 if inactive) |
+| `transitionHistory` | `TransitionEntry[]` | Ring buffer of last 20 transitions (cl-spec-004 section 5.4) |
 
 ---
 
@@ -609,10 +618,10 @@ Generates a quality report — a complete snapshot of context window quality at 
 
 **Behavior:**
 1. If no segments are active, returns a report with zero scores and no patterns. `segmentCount: 0`.
-2. Computes per-segment scores for all four dimensions. Uses lazy caching — only segments whose scores have been invalidated since the last report are rescored (cl-spec-002 section 8.2).
+2. Computes per-segment scores for all four dimensions. Uses lazy caching — only segments whose scores have been invalidated since the last report are rescored (cl-spec-002 section 9.7).
 3. Aggregates per-segment scores to window-level scores.
 4. Computes the composite score (cl-spec-002 section 8).
-5. Computes trend data by comparing against the previous report (cl-spec-002 section 9.4). `null` on first report.
+5. Computes trend data by comparing against the previous report (cl-spec-002 section 9.6). `null` on first report.
 6. Runs pattern detection over window scores, capacity metrics, and trend data (cl-spec-003 section 2).
 7. Assembles the complete `QualityReport` and caches it.
 
@@ -634,7 +643,7 @@ Generates a quality report — a complete snapshot of context window quality at 
 | `embeddingMode` | `"embeddings"` or `"trigrams"` | Which similarity mode was used for this report. |
 | `segments` | `SegmentScore[]` | Per-segment scores, ordered by composite ascending (weakest first). |
 | `groups` | `GroupScore[]` | Per-group aggregate scores, ordered by composite ascending. |
-| `continuityLedger` | `ContinuitySummary` | Eviction/compaction/restoration summary. |
+| `continuity` | `ContinuitySummary` | Eviction/compaction/restoration summary. |
 | `trend` | `TrendData` or `null` | Comparison against previous report. |
 | `patterns` | `DetectionResult` | Active degradation patterns with severity, explanation, and remediation hints. |
 | `task` | `TaskSummary` | Current task state summary (set/unset, stale flag, grace period). |
@@ -648,6 +657,8 @@ Generates a quality report — a complete snapshot of context window quality at 
 | `relevance` | number (0.0–1.0) | Window relevance, normalized to baseline. |
 | `continuity` | number (0.0–1.0) | Window continuity. |
 
+In the empty-window case (zero active segments), all WindowScores fields are `null`.
+
 **CapacityReport:**
 
 | Field | Type | Description |
@@ -658,7 +669,7 @@ Generates a quality report — a complete snapshot of context window quality at 
 | `headroom` | number | `capacity - totalActiveTokens`. May be negative if over capacity. |
 | `pinnedTokens` | number | Tokens locked by pinned segments. |
 | `seedTokens` | number | Tokens in seed-protected segments. |
-| `managedTokens` | number | Tokens in priority + default segments (evictable). |
+| `managedTokens` | number | Tokens in non-pinned segments (totalActiveTokens minus pinnedTokens). Includes seed, priority, and default segments. |
 | `availableCapacity` | number | `capacity - pinnedTokens`. |
 
 **TrendData:**
@@ -672,7 +683,10 @@ Generates a quality report — a complete snapshot of context window quality at 
 | `compositeDelta` | number | Change in composite since previous report. |
 | `tokensDelta` | number | Change in total active tokens since previous report. |
 | `segmentCountDelta` | number | Change in segment count since previous report. |
-| `previousReportId` | string | The report this trend was computed against. |
+| `previousReportId` | string | ID of the preceding report. |
+| `timeDelta` | number | Milliseconds between this report and the previous. |
+
+The entire `trend` field is `null` on the first report. When `trend` is non-null, all fields are present and non-null.
 
 ### 6.2 getBaseline
 
@@ -773,6 +787,8 @@ validate.evictionPlan(obj)         // → { valid: boolean, errors: ValidationEr
 ```
 
 Validates a plain JSON object against the corresponding schema. Returns a result object with `valid` (boolean) and `errors` (array of validation errors, empty if valid). Uses a JSON Schema draft 2020-12 validator internally.
+
+Formatting utilities (`formatReport`, `formatDiagnostics`, `formatPattern`) are defined in cl-spec-010 section 8. These are pure functions that produce plain-text representations of output objects.
 
 ### 6.5 State Serialization
 
@@ -889,6 +905,15 @@ getEmbeddingProviderInfo() -> EmbeddingProviderMetadata | null
 
 Returns metadata about the active embedding provider, or `null` if in trigram-only mode: `name`, `dimensions`, `modelFamily`.
 
+**EmbeddingProviderMetadata:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Provider name |
+| `dimensions` | number | Embedding vector dimensions |
+| `modelFamily` | string or null | Model family identifier |
+| `maxInputTokens` | number or null | Maximum input length in tokens |
+
 ---
 
 ## 8. Capacity and Inspection
@@ -978,11 +1003,29 @@ getEvictionHistory() -> EvictionRecord[]
 
 Returns all eviction records for the session, ordered by timestamp. This is the raw data behind the continuity ledger — every eviction and its pre-eviction quality snapshot.
 
+### 8.7 Diagnostics
+
+`getDiagnostics() → DiagnosticSnapshot`
+
+Returns a diagnostic snapshot of the instance's internal state, including report history, pattern history, session timeline, performance metrics, cache metrics, and provider information. Assembly only — no computation triggered. Tier 1 (<1ms).
+
+See cl-spec-010 for the complete DiagnosticSnapshot structure.
+
+### 8.8 Eviction Planning
+
+`planEviction(target: number, options?: PlanEvictionOptions) → EvictionPlan`
+
+Produces a ranked list of eviction candidates to reclaim at least `target` tokens. The plan is advisory — the caller decides which candidates to actually evict. Read-only: may trigger `assess()` if no current report exists, but does not modify segments.
+
+Options: `strategy` (override auto-selection), `includeSeeds` (default false), `compressionRatio` (default 0.5 for compaction recommendations).
+
+See cl-spec-008 for the complete EvictionPlan structure and ranking algorithm.
+
 ---
 
 ## 9. Event System
 
-context-lens emits events on lifecycle transitions. The event system is synchronous and observer-based — handlers are called inline during the operation that triggers the event. This means handlers execute before the triggering method returns.
+context-lens emits 24 events on lifecycle transitions. The event system is synchronous and observer-based — handlers are called inline during the operation that triggers the event. This means handlers execute before the triggering method returns.
 
 ### 9.1 Subscribing
 
@@ -1020,6 +1063,10 @@ Multiple handlers can be registered for the same event. Handlers are called in r
 | `customPatternRegistered` | `{ name: string, description: string }` | `registerPattern` successfully registers a custom pattern. |
 | `stateSnapshotted` | `{ timestamp: number, restorable: boolean, segmentCount: number, sizeEstimate: number }` | `snapshot` produces a state snapshot. |
 | `stateRestored` | `{ formatVersion: string, segmentCount: number, providerChanged: boolean, customPatternsRestored: number, customPatternsUnmatched: number }` | `fromSnapshot` completes restoration on the new instance. |
+| `reportGenerated` | `{ report: QualityReport }` | Fired after each `assess()` completes. Payload: the QualityReport. |
+| `budgetViolation` | `{ operation: string, selfTime: number, budgetTarget: number }` | Fired when an operation exceeds its performance budget tier. |
+
+The session timeline (cl-spec-010 section 5) records a superset of API events. Some timeline event types (e.g., `patternEscalated`, `patternDeescalated`) are logged to the timeline but not emitted as API events.
 
 ### 9.3 Handler Contract
 
@@ -1094,7 +1141,7 @@ The following invariants hold across all public API operations. They extend and 
 
 1. **Snapshot consistency.** Every read method (`getSegment`, `listSegments`, `getCapacity`, `assess`, `getTask`, etc.) returns data consistent with the most recent completed mutation. There is no window between a mutation returning and its effects being visible.
 
-2. **Atomic mutations.** Every mutating method (`add`, `update`, `replace`, `compact`, `split`, `evict`, `restore`, `createGroup`, `dissolveGroup`, `setTask`, `clearTask`) either completes fully or has no effect. Partial mutations are never observable.
+2. **Atomic mutations.** Every mutating method (`add`, `update`, `replace`, `compact`, `split`, `evict`, `restore`, `createGroup`, `dissolveGroup`, `setTask`, `clearTask`) either completes fully or has no effect. Partial mutations are never observable. `assess()` is not a mutating method. It either returns a complete QualityReport or throws. Custom pattern failures within `assess()` are handled per cl-spec-003 §10.5 (fail-open) and do not prevent report generation.
 
 3. **Deterministic reports.** Given the same sequence of operations on the same instance, `assess` produces identical scores. Scores depend only on segment content, metadata, task state, and provider behavior — never on wall-clock time, random state, or external factors. Timestamps in reports reflect wall-clock time but do not influence scores.
 
@@ -1107,6 +1154,12 @@ The following invariants hold across all public API operations. They extend and 
 7. **Provider consistency.** At any point in time, all token counts in the instance reflect the current tokenizer, and all embeddings (if any) reflect the current embedding provider. There is no state where some segments use one provider and others use a different one.
 
 8. **Capacity is advisory.** Adding segments that exceed capacity does not throw. context-lens reports the overage through utilization > 1.0 and saturation pattern activation. Enforcement is the caller's responsibility.
+
+**Read-only consumer contract.** Consumer modules (eviction advisory, diagnostics, fleet monitor, observability exporter) do not call segment-mutating methods (`add`, `update`, `replace`, `compact`, `split`, `evict`, `restore`) or configuration-mutating methods (`setTask`, `clearTask`, `setTokenizer`, `setEmbeddingProvider`). They may call `assess()`, which updates internal caches but does not modify segments or configuration.
+
+**Instance lifecycle.** context-lens instances require no explicit disposal. All resources (caches, history buffers, event handlers) are released when the instance is garbage collected. Callers managing external integrations (OTel exporters, fleet registrations) should detach these before releasing the instance reference.
+
+**Single-threaded access.** context-lens assumes single-threaded, sequential access. Concurrent calls from multiple async contexts produce undefined behavior. Callers in async environments must serialize access to each instance. Re-entrant calls from event handlers are also prohibited (section 9.3).
 
 ### Cross-Spec Invariant Summary
 

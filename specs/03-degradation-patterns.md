@@ -2,11 +2,11 @@
 id: cl-spec-003
 title: Degradation Patterns
 type: design
-status: complete
+status: complete (amended)
 created: 2026-03-28
 revised: 2026-04-04
 authors: [Akil Abderrahim, Claude Opus 4.6]
-tags: [degradation, patterns, detection, saturation, erosion, fracture, gap, collapse, alerting]
+tags: [degradation, patterns, detection, saturation, erosion, fracture, gap, collapse, alerting, custom-patterns, registration]
 depends_on: [cl-spec-002]
 ---
 
@@ -88,7 +88,7 @@ Pattern detection is not a separate pass. It runs as part of quality report gene
 | **Gap** | Relevance | Task drift | The window is full of content that doesn't serve the current task |
 | **Collapse** | Continuity | Information loss | Critical context has been permanently lost through eviction or compaction |
 
-Each pattern is defined in its own section (3–7). Section 8 covers how patterns interact and compound.
+Each pattern is defined in its own section (3–7). Section 8 covers how patterns interact and compound. Section 10 defines a registration mechanism for caller-defined custom patterns.
 
 ---
 
@@ -115,6 +115,7 @@ Pattern detection is a **consumer** of quality data, not a producer. It reads th
 | `segments[]` | Quality report section 9.3 | All patterns (per-segment diagnostics) |
 | `groups[]` | Quality report section 9.4 | Fracture (group integrity) |
 | `continuityLedger` | Quality report section 9.5 | Collapse (loss history) |
+| trend.tokensDelta | Quality report (cl-spec-002 section 9.6) | Saturation (rate-based early activation) |
 
 **Secondary inputs — from the capacity report (cl-spec-006 section 4.5):**
 
@@ -187,6 +188,7 @@ Each quality report includes a `patterns` field containing the full detection re
 | `signature` | `PatternSignature` | The scores and signals that activated this pattern |
 | `explanation` | string | Human-readable diagnostic — what is happening and why |
 | `remediation` | `RemediationHint[]` | Structured suggestions for the caller, ordered by estimated impact |
+| compoundContext | CompoundContext or null | Present when this pattern participates in a known compound (section 8.2). Null otherwise. |
 
 **PatternSignature structure:**
 
@@ -203,7 +205,7 @@ The signature is diagnostic evidence — it answers "why did this pattern fire?"
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `action` | string | What the caller should do: `evict`, `compact`, `deduplicate`, `reorder`, `restore`, `updateTask`, `increaseCapacity` |
+| `action` | string | What the caller should do: `evict`, `compact`, `deduplicate`, `reorder`, `restore`, `updateTask`, `increaseCapacity`, `slowEviction`, `restart`, `dissolve` |
 | `target` | string or null | Specific segment IDs, group IDs, or protection tiers the action targets. Null for general suggestions. |
 | `estimatedImpact` | string or null | Human-readable estimate: `"reclaim ~3200 tokens"`, `"improve density by ~0.15"`. Null when impact cannot be estimated. |
 | `description` | string | Human-readable explanation of why this action helps |
@@ -284,7 +286,7 @@ Trending is a qualitative signal for the caller: "this pattern is getting better
 
 **History retention.** Resolved pattern entries are retained for the lifetime of the session. They are not included in the quality report's `patterns` array (which contains only active patterns), but they are available through the diagnostics API (cl-spec-010) and are used by the detection framework itself for one purpose: distinguishing first-time activation from recurrence. A pattern that activates, resolves, and activates again within the same session receives a `recurrence: true` flag and includes the previous activation's duration and peak severity in its diagnostic output. Recurrence is a signal that the underlying problem was not fully addressed — the caller patched the symptom but the root cause persists.
 
-**History is not persisted across sessions.** Pattern history exists only in memory for the duration of the session. There is no serialization, no persistence to disk, and no restoration of pattern history when a new session begins. Each session starts with a clean detection state. This matches the quality model's session-scoped design — the baseline, continuity ledger, and score caches are all session-scoped, and pattern history follows the same boundary.
+Pattern history is session-scoped by default. Each new instance starts with empty history. The serialization mechanism (cl-spec-014) preserves pattern tracking state and history across sessions when the caller explicitly opts in via `snapshot()`/`fromSnapshot()`. Without explicit serialization, pattern history exists only in memory for the duration of the session.
 
 ---
 
@@ -1398,10 +1400,10 @@ The caller can disable specific patterns entirely. A suppressed pattern is not c
 | Fracture | The caller's use case involves intentionally heterogeneous content — for example, a research session that deliberately loads documents from diverse domains. Low coherence is expected and not harmful. |
 | Collapse | Rare, but a caller running a short-lived session with aggressive eviction may not want continuity tracking overhead or collapse alerts. |
 
-**Configuration surface.** Suppression is configured via a `suppress` array passed at detection framework initialization:
+**Configuration surface.** Suppression is configured via a `suppressedPatterns` array passed at detection framework initialization:
 
 ```
-suppress?: PatternName[]   // e.g., ["gap", "saturation"]
+suppressedPatterns?: PatternName[]   // e.g., ["gap", "saturation"]
 ```
 
 An empty array (or omission) means no patterns are suppressed. The array accepts any combination of the five pattern names. Suppressing all five patterns is technically valid — the detection result will have `patterns: [], patternCount: 0, highestSeverity: null`. This is a degenerate configuration but not an error — the caller explicitly asked for no detection.
@@ -1419,6 +1421,8 @@ If both apply (no task descriptor and explicit suppression), the effect is the s
 **Suppression and compound detection.** When a pattern is suppressed, compounds that include it cannot activate. If saturation is suppressed, the "full of junk" compound (saturation + erosion) cannot fire — even if erosion is active and utilization is high. The remaining active pattern (erosion) is still detected and reported normally; it simply does not receive compound context for compounds that require the suppressed pattern. This is the correct behavior: if the caller suppressed saturation, they do not want capacity-related diagnostics, and compound diagnoses that reference capacity pressure would be inconsistent with that intent.
 
 **Suppression and pattern history.** Suppressed patterns do not generate history entries (section 2.5). If a pattern was active, then suppressed mid-session (which requires reinitializing the detection framework), the previous activation's history is lost. This is acceptable because session-scoped reinitialization is a fresh start — the new instance has no knowledge of the previous instance's state.
+
+Suppression accepts custom pattern names in addition to the five base pattern names. Suppressing a custom pattern name before that pattern is registered is valid — the suppression takes effect if and when the pattern is later registered via `registerPattern`. Validation of custom pattern names occurs at detection time, not at configuration time.
 
 ### 9.3 Hysteresis
 
@@ -1505,6 +1509,8 @@ The alternative — a simplified view exposing only the four dimension scores, u
 - **Simplicity.** No new type to define. Custom patterns receive what `assess()` returns. The caller already knows this type.
 
 Custom patterns that only need dimension scores can read `report.windowScores` — they are not forced to traverse the full report. The full report is the *ceiling*, not the *floor*, of what custom patterns can inspect.
+
+When the segment count exceeds the sampling threshold (cl-spec-009 section 5), the quality report contains scores computed from sampled similarity data. Custom pattern detection logic should be designed to tolerate score approximation.
 
 ### 10.2 The PatternDefinition Contract
 
@@ -1601,7 +1607,7 @@ The pattern is validated and registered immediately. It participates in the next
 
 Custom patterns participate in the same detection pass as base patterns. During `assess()`:
 
-1. The quality model computes scores and assembles the QualityReport (sections 1–9 of cl-spec-002).
+1. The quality model computes scores and assembles the QualityReport (the quality model (cl-spec-002)).
 2. Base pattern detection runs on the report (section 2 of this spec).
 3. Custom pattern detection runs on the same report, in registration order.
 4. Results from base and custom patterns are merged into the `DetectionResult`.
@@ -1621,6 +1627,8 @@ For each registered, non-suppressed custom pattern:
 **Error handling.** If `detect` throws, the framework catches the error, emits a warning to the diagnostic warning list (`"Custom pattern '{name}' detect() threw: {error.message}"`), and treats this cycle as if `detect` returned `null`. The pattern's hysteresis state is unchanged — a throwing `detect` does not activate or deactivate the pattern. This fail-open behavior prevents a buggy custom pattern from breaking the entire detection framework.
 
 If `severity` returns an invalid value, the framework treats the cycle as `null` (same as `detect` throwing). If `explanation` or `remediation` throw, fallbacks are used (section 10.3).
+
+For `severity`, `explanation`, and `remediation` function failures, see §10.3 fallback behavior.
 
 **Performance contract.** Custom `detect`, `severity`, `explanation`, and `remediation` functions are called within the `assess()` budget (cl-spec-009 section 3.3). The framework does not enforce a per-function time limit — it trusts the caller to provide fast functions. A custom `detect` that calls an external API or performs expensive computation will blow the assessment budget. This is the caller's responsibility. The performance measurement infrastructure (cl-spec-009 section 8) reports total assessment time including custom pattern overhead, so budget violations caused by slow custom patterns are visible in diagnostics.
 
@@ -1672,7 +1680,7 @@ The following limitations apply to custom patterns in the initial implementation
 
 **No threshold overrides.** Custom patterns manage their own thresholds internally — through their `detect` and `severity` functions. The per-pattern threshold override mechanism (section 9.1) applies only to base patterns. Custom patterns that need configurable thresholds should accept configuration through their closure or constructor, not through the detection framework's threshold API.
 
-**No dynamic priority.** A custom pattern's priority is fixed at registration time. It cannot be changed after registration. If the caller needs different priority ordering, they should unregister and re-register the pattern — except unregistration is not available in v1, so the priority is effectively immutable for the session.
+**No dynamic priority.** Custom pattern priority is immutable once registered. If a custom pattern is registered with the wrong priority, the only recourse is to create a new ContextLens instance with corrected custom pattern definitions.
 
 **No mutual awareness.** Custom patterns cannot access the detection result of other patterns (base or custom). The `detect` function receives the QualityReport, which contains the previous cycle's `DetectionResult` (via the `patterns` field). This means a custom pattern can read *last report's* pattern state but not *this cycle's* base pattern results. This one-cycle lag prevents detection order from affecting results — if custom patterns could read base pattern results from the same cycle, the detection result would depend on whether base patterns ran before or after custom patterns.
 
@@ -1684,7 +1692,7 @@ The following limitations apply to custom patterns in the initial implementation
 
 The following invariants hold for the pattern detection framework. They are not aspirational — they are constraints that the implementation must enforce. Violations indicate bugs, not edge cases.
 
-**Invariant 1: Deterministic detection.** Given the same quality report and the same pattern history state, pattern detection produces the same result. There is no randomness, no sampling, and no dependence on wall-clock time (timestamps come from the quality report, not from `Date.now()`). Two calls to detection with identical inputs produce identical outputs. This guarantee enables testing, replay, and debugging — a bug report that includes the quality report and pattern history is sufficient to reproduce any detection result.
+**Invariant 1: Deterministic detection.** Given the same quality report, the same pattern history state, *and the same custom pattern set in the same registration order*, pattern detection produces the same result. There is no randomness, no sampling, and no dependence on wall-clock time (timestamps come from the quality report, not from `Date.now()`). Two calls to detection with identical inputs produce identical outputs. This guarantee enables testing, replay, and debugging — a bug report that includes the quality report and pattern history is sufficient to reproduce any detection result.
 
 *Caveat:* Determinism is with respect to a fixed detection state. Two consecutive calls with the same quality report but different pattern history (because the first call updated the history) may produce different results. This is expected — hysteresis depends on history. The invariant is: same inputs, same outputs. Pattern history is an input.
 

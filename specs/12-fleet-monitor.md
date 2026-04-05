@@ -114,10 +114,10 @@ Returns information about all registered instances.
 | Field | Type | Description |
 |-------|------|-------------|
 | `label` | string | The registration label. |
-| `segmentCount` | integer | Current active segment count (from `getSegmentCount()`). |
-| `capacity` | integer | Configured capacity. |
-| `utilization` | number | Current utilization. |
-| `lastAssessedAt` | number or null | Timestamp of the instance's most recent quality report. `null` if never assessed. |
+| `segmentCount` | integer | Current active segment count (from `getSegmentCount().active`). |
+| `capacity` | integer | Configured capacity (from `getCapacity().capacity`). |
+| `utilization` | number | Current utilization (from `getCapacity().utilization`). |
+| `lastAssessedAt` | number or null | Timestamp of the most recent `assessFleet()` or `assessInstance()` call for this instance. Null if this instance has never been assessed through the fleet. |
 
 `listInstances()` does not trigger assessment — it reads lightweight metadata from each instance.
 
@@ -292,7 +292,7 @@ Same subscription model as the core event system (cl-spec-007 §9.1). Returns an
 
 ## 7. Invariants and Constraints
 
-**Invariant 1: Read-only consumer.** The fleet does not modify any registered instance. It calls `assess()` (which computes and caches but does not modify segments), `getCapacity()`, and `getSegmentCount()` — all read operations. It does not call `add`, `evict`, `setTask`, or any mutating method. Registering an instance with a fleet has no effect on the instance's behavior.
+**Invariant 1: Read-only consumer.** The fleet monitor does not call segment-mutating methods or configuration-mutating methods on registered instances. It calls `assess()` (or uses cached reports), `getCapacity()`, and `getSegmentCount()` — all of which are non-mutating reads or cache-updating computations.
 
 **Invariant 2: Instance independence.** Registered instances do not share state through the fleet. The fleet aggregates data from instances but does not propagate data between them. An assessment of instance A cannot affect instance B. Cross-instance comparisons in the fleet report are derived from independent assessments.
 
@@ -304,13 +304,15 @@ Same subscription model as the core event system (cl-spec-007 §9.1). Returns an
 
 **Invariant 6: No internal state dependency.** The fleet depends only on the public API of `ContextLens` (cl-spec-007). It does not access internal state, private methods, or implementation details. A conforming `ContextLens` implementation with the same public API would work with the fleet without modification.
 
+**Serialization.** Fleet state is not serializable. The fleet holds instance references, not instance state. To persist and restore a fleet, serialize individual instances via `snapshot()` (cl-spec-014), restore them via `fromSnapshot()`, and re-register with a new fleet instance.
+
 ---
 
 ## 8. References
 
 | Reference | Description |
 |-----------|-------------|
-| `cl-spec-007` (API Surface) | Defines the public API that the fleet consumes: `assess()`, `getCapacity()`, `getSegmentCount()`, `getDiagnostics()`. The fleet is a consumer of this API. |
+| `cl-spec-007` (API Surface) | Defines the public API that the fleet consumes: `assess()`, `getCapacity()`, `getSegmentCount()`. The fleet is a consumer of this API. |
 | `cl-spec-003` (Degradation Patterns) | Defines the pattern detection results that the fleet aggregates into hotspots and fleet-level degradation events. |
 | `cl-spec-011` (Report Schema) | Defines schema conventions followed by the FleetReport. The fleet report extends the schema vocabulary with fleet-specific types (FleetAggregate, Hotspot, FleetCapacity). |
 

@@ -2,9 +2,9 @@
 id: cl-spec-006
 title: Tokenization Strategy
 type: design
-status: draft
+status: complete
 created: 2026-03-25
-revised: 2026-03-25
+revised: 2026-04-05
 authors: [Akil Abderrahim, Claude Opus 4.6]
 tags: [tokenization, token-counting, provider, performance, caching]
 depends_on: [cl-spec-001]

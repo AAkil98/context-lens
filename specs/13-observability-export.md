@@ -91,7 +91,7 @@ Unsubscribes from the instance's events and stops metric updates. The OTel instr
 
 ### 3.1 Gauges
 
-Updated on each `assess()` call (via the `reportGenerated` event on the instance's timeline).
+Updated on each `assess()` call (via the `reportGenerated` event on the instance's event system).
 
 | Metric name | Type | Unit | Description |
 |-------------|------|------|-------------|
@@ -114,11 +114,11 @@ Monotonically increasing counters, updated on occurrence.
 | Metric name | Type | Unit | Description |
 |-------------|------|------|-------------|
 | `{prefix}.evictions_total` | Counter | `{evictions}` | Cumulative segment eviction count. Incremented by each `segmentEvicted` event. |
-| `{prefix}.compactions_total` | Counter | `{compactions}` | Cumulative compaction count. |
-| `{prefix}.restorations_total` | Counter | `{restorations}` | Cumulative restoration count. |
+| `{prefix}.compactions_total` | Counter | `{compactions}` | Cumulative compaction count. Incremented on `segmentCompacted` events. |
+| `{prefix}.restorations_total` | Counter | `{restorations}` | Cumulative restoration count. Incremented on `segmentRestored` events. |
 | `{prefix}.pattern_activations_total` | Counter | `{activations}` | Cumulative pattern activation count (base + custom). |
 | `{prefix}.assess_count` | Counter | `{assessments}` | Total `assess()` calls. |
-| `{prefix}.task_changes_total` | Counter | `{changes}` | Task transitions classified as changes (not refinements or same). |
+| `{prefix}.task_changes_total` | Counter | `{changes}` | Task transitions classified as changes (not refinements or same). The adapter filters `taskChanged` events by `transition.type === "change"`, excluding refinements and same-task no-ops. |
 
 ### 3.3 Histograms
 
@@ -226,7 +226,7 @@ No custom data pipeline is needed. The adapter produces standard OTel metrics th
 
 ## 6. Invariants and Constraints
 
-**Invariant 1: Read-only consumer.** The adapter does not modify the context-lens instance. It subscribes to events and reads reports. Attaching or detaching an exporter has no effect on quality scoring, pattern detection, or any instance behavior.
+**Invariant 1: Read-only consumer.** The OTel adapter does not call segment-mutating methods or configuration-mutating methods. It subscribes to the instance's event system and reads report data from event payloads. Event handlers follow the contract defined in cl-spec-007 section 9.3.
 
 **Invariant 2: Optional dependency.** context-lens core does not import any OTel module. The adapter is a separate entry point (`context-lens/otel`). Callers who do not install the OTel SDK can use context-lens without the adapter. The core library's bundle size, startup time, and behavior are unaffected.
 

@@ -2,7 +2,7 @@
 id: cl-spec-004
 title: Task Identity
 type: design
-status: draft
+status: complete
 created: 2026-04-01
 revised: 2026-04-01
 authors: [Akil Abderrahim, Claude Opus 4.6]
@@ -54,7 +54,7 @@ Task identity is not a task decomposition framework. It does not model subtasks,
 
 Task identity is not a conversation analyzer. It does not read the conversation to detect topic shifts, infer user intent, or predict the next task. It reads the task descriptor the caller provides and compares it to the previous descriptor. The comparison is mechanical (embedding similarity and field-level diff), not semantic (understanding what the user is trying to accomplish).
 
-Task identity is not a persistence layer. Task state exists only in memory for the duration of the session. There is no serialization, no persistence to disk, and no restoration of task history across sessions. Each session starts with no task set. This matches the session-scoped design of quality scores, pattern history, and the continuity ledger.
+Task identity is not a persistence layer. Task state is session-scoped by default — each new session starts with no task set. Task state participates in instance serialization via `snapshot()`/`fromSnapshot()` (cl-spec-014), but does not auto-persist. Without explicit serialization, task state exists only in memory for the duration of the session. This matches the session-scoped design of quality scores, pattern history, and the continuity ledger.
 
 ### How task identity flows through the system
 
@@ -99,8 +99,8 @@ The task descriptor is the caller's declaration of what the model is currently w
 |-------|------|----------|-------------|
 | `description` | string | **Yes** | Free-text description of the current task. This is the primary semantic signal — it is embedded or trigrammed and compared against segment content for similarity scoring. Should be specific enough to distinguish this task from other work the caller might do. |
 | `keywords` | string[] | No | Key terms that indicate relevance. Segments containing these terms receive a keyword boost (cl-spec-002 section 5.2). Keywords provide precision where the description provides breadth — they catch specific identifiers, function names, file paths, or domain terms that semantic similarity might miss. |
-| `relatedOrigins` | string[] | No | Origin values (cl-spec-001 section 3.3) that are inherently relevant to this task. A task about "fix the login bug" might declare `["tool:grep", "file:auth.ts", "file:auth.test.ts"]` as related origins — any segment with those origins receives an origin relevance boost (cl-spec-002 section 5.3). |
-| `relatedTags` | string[] | No | Segment tags (cl-spec-001 section 3.4) that indicate task relevance. Segments carrying these tags receive a tag relevance boost (cl-spec-002 section 5.3). |
+| `relatedOrigins` | string[] | No | Origin values (cl-spec-001 section 4.2) that are inherently relevant to this task. A task about "fix the login bug" might declare `["tool:grep", "file:auth.ts", "file:auth.test.ts"]` as related origins — any segment with those origins receives an origin relevance boost (cl-spec-002 section 5.3). |
+| `relatedTags` | string[] | No | Segment tags (cl-spec-001 section 4.5) that indicate task relevance. Segments carrying these tags receive a tag relevance boost (cl-spec-002 section 5.3). |
 
 **`description` is the only required field.** A task descriptor with just a description and no keywords, origins, or tags is fully valid and functional — similarity between the description and segment content is the primary relevance signal (0.7 weight in the content relevance formula, cl-spec-002 section 5.2). The optional fields add precision but are not necessary for useful relevance scoring.
 
@@ -138,12 +138,14 @@ Normalization transforms a validated descriptor into a canonical form before sto
 |-------|--------------|-----------|
 | `description` | Trim leading/trailing whitespace. Collapse internal whitespace runs to a single space (tabs, newlines, multiple spaces → one space). Do **not** lowercase. | Whitespace variation is noise — `"fix  the\n  bug"` and `"fix the bug"` are the same task. Casing is preserved because it carries semantic signal: `"OAuth"` and `"oauth"` may embed differently, and callers may capitalize intentionally (proper nouns, acronyms, class names). Lowercasing would destroy signal for zero gain. |
 | `keywords` | Each keyword trimmed. Deduplicated case-insensitively — on collision, keep the first occurrence's casing. Sorted lexicographically (case-sensitive sort, for determinism). Absent or null → empty array. | Case-insensitive dedup because keyword matching is case-insensitive (cl-spec-002 section 5.2) — `"Auth"` and `"auth"` would produce identical match results, so keeping both is misleading. Sort for deterministic comparison: two descriptors with the same keywords in different order are the same descriptor. |
-| `relatedOrigins` | Each origin trimmed. Deduplicated exactly (case-sensitive). Sorted lexicographically. Absent or null → empty array. | Origins are case-sensitive per cl-spec-001 section 3.3 — `"file:Auth.ts"` and `"file:auth.ts"` are different origins. Exact dedup matches this semantics. Sort for the same determinism reason as keywords. |
-| `relatedTags` | Each tag trimmed. Deduplicated exactly (case-sensitive). Sorted lexicographically. Absent or null → empty array. | Tags are case-sensitive per cl-spec-001 section 3.4. Same reasoning as origins. |
+| `relatedOrigins` | Each origin trimmed. Deduplicated exactly (case-sensitive). Sorted lexicographically. Absent or null → empty array. | Origins are case-sensitive per cl-spec-001 section 4.2 — `"file:Auth.ts"` and `"file:auth.ts"` are different origins. Exact dedup matches this semantics. Sort for the same determinism reason as keywords. |
+| `relatedTags` | Each tag trimmed. Deduplicated exactly (case-sensitive). Sorted lexicographically. Absent or null → empty array. | Tags are case-sensitive per cl-spec-001 section 4.5. Same reasoning as origins. |
 
 **Idempotency.** Normalizing a normalized descriptor produces the identical descriptor — same description string, same keyword array (same elements, same order), same origins, same tags. This is a mechanical consequence of the normalization rules: trimming trimmed strings is a no-op, collapsing single spaces is a no-op, deduplicating unique elements is a no-op, sorting sorted arrays is a no-op. Idempotency matters for the identity comparison in section 3 — it guarantees that "same after normalization" is a stable equivalence relation, not one that shifts depending on how many times the descriptor has been processed.
 
 **Normalization order.** Normalization runs after validation and before storage. The sequence within `setTask` is: validate → normalize → compare against current (section 3) → classify transition → store → prepare for similarity (section 6). Each step consumes the output of the previous step, and the normalized form is the input to all downstream operations.
+
+> **Note:** The canonical step sequence for `setTask` is defined in section 6.5.
 
 ### 2.4 Immutability After Set
 
@@ -241,7 +243,7 @@ This is a known tradeoff, not a defect. The trigram fallback path is intentional
 
 ### 3.4 First-Task Classification
 
-When the task state is UNSET and the caller calls `setTask` for the first time, there is no current descriptor to compare against. This is not a same/refinement/change classification — it is an **initial set**. The transition type is recorded as `"set"` (section 5.4), not `"change"`. No grace period activates because there is no previous task to create a relevance cliff against — the window has been operating with relevance defaulting to 1.0, and the first real relevance scores may be lower, but this is the baseline establishing itself, not a degradation.
+When the task state is UNSET and the caller calls `setTask` for the first time, there is no current descriptor to compare against. This is not a same/refinement/change classification — it is an **initial set**. The transition type is recorded as `"new"` (section 5.4), not `"change"`. No grace period activates because there is no previous task to create a relevance cliff against — the window has been operating with relevance defaulting to 1.0, and the first real relevance scores may be lower, but this is the baseline establishing itself, not a degradation.
 
 ### 3.5 Why This Classification Matters
 
@@ -297,7 +299,7 @@ Five transitions are defined. Each is triggered by exactly one operation and pro
 
 **UNSET → ACTIVE** (`setTask` when no current task)
 
-The first `setTask` call in a session, or the first after a `clearTask`. No comparison is needed — there is no previous descriptor. The descriptor is validated, normalized, prepared (section 6), and stored. The transition is recorded as type `"set"` (section 5.4). No grace period activates (section 3.4). All task state counters initialize:
+The first `setTask` call in a session, or the first after a `clearTask`. No comparison is needed — there is no previous descriptor. The descriptor is validated, normalized, prepared (section 6), and stored. The transition is recorded as type `"new"` (section 5.4). No grace period activates (section 3.4). All task state counters initialize:
 
 ```
 currentTask       = normalized descriptor
@@ -307,8 +309,8 @@ transitionCount   = 1
 changeCount       = 0
 refinementCount   = 0
 reportsSinceSet   = 0
-graceActive       = false
-reportsRemainingInGrace = 0
+gracePeriodActive       = false
+gracePeriodRemaining = 0
 ```
 
 **ACTIVE → ACTIVE (same task)** (`setTask` with identical normalized descriptor)
@@ -334,8 +336,8 @@ transitionCount   += 1
 refinementCount   += 1
 reportsSinceSet   = 0
 reportsSinceTransition = 0
-graceActive       = unchanged                    // refinement does NOT activate grace, but does NOT cancel an active grace period either
-reportsRemainingInGrace = unchanged
+gracePeriodActive       = unchanged                    // refinement does NOT activate grace, but does NOT cancel an active grace period either
+gracePeriodRemaining = unchanged
 ```
 
 Cached relevance scores are invalidated. The task descriptor is re-prepared (section 6). A transition record of type `"refinement"` is appended (section 5.4).
@@ -356,8 +358,8 @@ transitionCount   += 1
 changeCount       += 1
 reportsSinceSet   = 0
 reportsSinceTransition = 0
-graceActive       = true
-reportsRemainingInGrace = 2
+gracePeriodActive       = true
+gracePeriodRemaining = 2
 ```
 
 Cached relevance scores are invalidated. The task descriptor is re-prepared (section 6). A transition record of type `"change"` is appended (section 5.4). The grace period activates, capping gap severity for 2 report cycles (section 5.2).
@@ -373,8 +375,8 @@ taskSetAt          = null
 transitionCount   += 1
 reportsSinceSet   = 0
 reportsSinceTransition = 0
-graceActive       = false                        // grace period deactivated — no task means no gap to protect against
-reportsRemainingInGrace = 0
+gracePeriodActive       = false                        // grace period deactivated — no task means no gap to protect against
+gracePeriodRemaining = 0
 ```
 
 Cached relevance scores are invalidated (they were computed against a task that no longer exists; the new scores are all 1.0). The prepared form (embedding/trigrams) is discarded. A transition record of type `"clear"` is appended (section 5.4).
@@ -392,9 +394,20 @@ Four operations compose the task lifecycle API. This section defines their seman
 3. If task state is UNSET: transition UNSET → ACTIVE. Skip comparison.
 4. If task state is ACTIVE: compare normalized descriptor to current (section 3.2). Classify as same/refinement/change. Execute the corresponding transition (section 4.2).
 5. If not a same-task no-op: prepare the descriptor for similarity computation (section 6). Invalidate relevance caches.
-6. Return void. `setTask` is fire-and-forget — the caller does not receive the classification result synchronously. The classification is recorded in task state and available via `getTaskState`.
+6. Return a `TaskTransition` object containing the classification (`type`), the similarity score (`similarity`), and the previous task descriptor (`previousTask`).
 
-**Why `setTask` doesn't return the classification.** The classification (same/refinement/change) is an internal concern that drives cache invalidation and grace period mechanics. The caller should not branch on it — if they need to know whether their task changed, they can compare descriptors themselves, or inspect `getTaskState` after the fact. Returning the classification would invite callers to build control flow around it, coupling their logic to context-lens's internal transition semantics.
+**`TaskTransition` type:**
+
+```
+TaskTransition:
+- type: "new" | "refinement" | "change" | "same" | "clear"
+- similarity: number (0.0–1.0) — similarity between old and new descriptors. 0.0 for "new" (no previous task). 1.0 for "same".
+- previousTask: TaskDescriptor or null — the previous task descriptor. Null for "new".
+```
+
+The `TaskTransition` return value gives the caller immediate feedback on how context-lens classified the transition. The `type` field captures the classification, `similarity` provides the raw similarity score used in classification, and `previousTask` gives the caller access to the descriptor that was replaced (if any). The exact method signature and return type wrapping are defined in cl-spec-007 (API Surface), which is authoritative for the API contract.
+
+> **Note:** The canonical step sequence for `setTask` is defined in section 6.5.
 
 **`clearTask()`** — Remove the current task. If the task state is already UNSET, `clearTask` is a no-op — no transition recorded, no state change. If ACTIVE, executes the ACTIVE → UNSET transition (section 4.2). Returns void.
 
@@ -408,17 +421,20 @@ The task state object is the complete representation of task identity at a point
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `currentTask` | TaskDescriptor \| null | The current normalized task descriptor, or null if UNSET. |
-| `previousTask` | TaskDescriptor \| null | The descriptor from the last task change or clear. Null if there has been at most one task set with no changes. Retained across exactly one transition — only the most recent previous task is stored. |
 | `state` | `"unset"` \| `"active"` | Current lifecycle state. |
-| `taskSetAt` | timestamp \| null | When the current task was set (or last refined). Null if UNSET. |
-| `transitionCount` | number | Total `setTask`/`clearTask` calls that produced a state change — excludes same-task no-ops. Includes initial sets, refinements, changes, and clears. |
-| `changeCount` | number | Subset of `transitionCount` that were task changes (section 3.1). Does not include refinements, initial sets, or clears. |
-| `refinementCount` | number | Subset of `transitionCount` that were refinements. |
-| `reportsSinceSet` | number | Quality reports generated since the last `setTask` call (including same-task no-ops that reset the counter). Used for staleness detection (section 5.3). |
-| `reportsSinceTransition` | number | Quality reports generated since the last transition that was not a same-task no-op. Used for grace period countdown. |
-| `graceActive` | boolean | True during the 2-report grace period after a task change. |
-| `reportsRemainingInGrace` | number | 0, 1, or 2. Decremented each time a quality report is generated while `graceActive` is true. When it reaches 0, `graceActive` is set to false. |
+| `currentTask` | `TaskDescriptor \| null` | Current task descriptor. Null when unset. |
+| `previousTask` | `TaskDescriptor \| null` | Previous task descriptor. Null if no prior task. |
+| `taskSetAt` | `number \| null` | Timestamp when current task was set. Null when unset. |
+| `transitionCount` | `number` | Total transitions (set + change + refinement + clear). |
+| `changeCount` | `number` | Total task changes. |
+| `refinementCount` | `number` | Total refinements. |
+| `reportsSinceSet` | `number` | Reports generated since last setTask. |
+| `reportsSinceTransition` | `number` | Reports since last transition of any type. |
+| `lastTransition` | `TaskTransition \| null` | Most recent transition result. Null if no transitions. |
+| `stale` | `boolean` | True when reportsSinceSet >= 5 (section 5.3). |
+| `gracePeriodActive` | `boolean` | Whether grace period is in effect (section 5.2). |
+| `gracePeriodRemaining` | `number` | Reports remaining in grace period (0 if inactive). |
+| `transitionHistory` | `TransitionEntry[]` | Ring buffer of last 20 transitions (section 5.4). |
 
 **`reportsSinceSet` vs. `reportsSinceTransition`.** These track different things. `reportsSinceSet` measures how long since the caller last touched `setTask` at all — it resets on same-task no-ops, because even a no-op indicates the caller is aware of the task. `reportsSinceTransition` measures how long since the last real change — it does not reset on no-ops, because the grace period countdown should not restart when the caller re-asserts the same descriptor. The distinction matters: staleness is about caller attentiveness (any `setTask` touch resets it), grace period is about window adaptation (only real transitions reset it).
 
@@ -462,16 +478,16 @@ The grace period is a 2-report window after a task change during which the gap d
 
 ```
 On task change:
-    graceActive = true
-    reportsRemainingInGrace = 2
+    gracePeriodActive = true
+    gracePeriodRemaining = 2
 
-On each quality report while graceActive:
-    reportsRemainingInGrace -= 1
-    if reportsRemainingInGrace == 0:
-        graceActive = false
+On each quality report while gracePeriodActive:
+    gracePeriodRemaining -= 1
+    if gracePeriodRemaining == 0:
+        gracePeriodActive = false
 ```
 
-**Effect on gap detection (cl-spec-003 section 6.3).** While `graceActive` is true:
+**Effect on gap detection (cl-spec-003 section 6.3).** While `gracePeriodActive` is true:
 
 - Gap severity is capped at `watch`. Even if relevance drops below 0.3 at 90% utilization (which would normally trigger `critical`), the reported severity is `watch`. The gap pattern still fires — the caller sees that relevance has dropped — but the severity reflects "this is expected, you have time to fix it," not "this is an emergency."
 - Rate-based severity elevation is suppressed. The general rule (cl-spec-003 section 2.4) elevates severity by one level when a score drops by more than 0.15 between consecutive reports. This elevation is suppressed during grace because the drop is expected — it is the task change, not a sudden degradation.
@@ -481,7 +497,7 @@ On each quality report while graceActive:
 
 **Why not configurable.** The grace period duration (2 reports) is fixed. Configurability was considered and rejected: the grace period is a mechanical safeguard against a specific false-positive pattern (gap alarm on task change). The correct duration is "enough time for one round-trip of inspection and action." Making it configurable invites misconfiguration — a grace period of 0 defeats the purpose, a grace period of 10 masks real problems. Two reports is the right answer for all callers.
 
-**Grace period and rapid task changes.** If the caller changes tasks again while the grace period is active, the grace period restarts — `reportsRemainingInGrace` resets to 2. This handles the case where a caller rapidly explores several tasks (common in interactive agents): each change gets its own adaptation window. The grace period does not stack or extend beyond 2 reports.
+**Grace period and rapid task changes.** If the caller changes tasks again while the grace period is active, the grace period restarts — `gracePeriodRemaining` resets to 2. This handles the case where a caller rapidly explores several tasks (common in interactive agents): each change gets its own adaptation window. The grace period does not stack or extend beyond 2 reports.
 
 **Grace period and refinements.** A refinement during an active grace period does not cancel or restart it (section 4.2). The grace period continues counting down. The rationale: the caller changed tasks (grace started), then refined the new task (sharpened it). The window still hasn't adapted to the new work — the grace period is still protecting against the original change, not the refinement.
 
@@ -528,11 +544,11 @@ Each transition (excluding same-task no-ops, which are not transitions) appends 
 
 | Field | Type | Present for | Description |
 |-------|------|-------------|-------------|
-| `type` | `"set"` \| `"change"` \| `"refinement"` \| `"clear"` | All | The transition classification. |
+| `type` | `"new"` \| `"refinement"` \| `"change"` \| `"same"` \| `"clear"` | All | The transition classification. `"same"` does not appear in transition history (same-task is a no-op, not a transition). `"clear"` represents the clearTask operation. |
 | `timestamp` | timestamp | All | When the transition occurred. |
-| `similarity` | number | `"change"`, `"refinement"` | Description similarity between old and new task (section 3.2). Not present for `"set"` (no previous task) or `"clear"` (no new task). |
-| `previousDescription` | string (truncated to 200 chars) | `"change"`, `"refinement"`, `"clear"` | The description of the task being replaced or cleared. Truncated to bound log memory. Not present for `"set"` (no previous task). |
-| `newDescription` | string (truncated to 200 chars) | `"set"`, `"change"`, `"refinement"` | The description of the new task. Not present for `"clear"` (no new task). |
+| `similarity` | number | `"change"`, `"refinement"` | Description similarity between old and new task (section 3.2). Not present for `"new"` (no previous task) or `"clear"` (no new task). |
+| `previousDescription` | string (truncated to 200 chars) | `"change"`, `"refinement"`, `"clear"` | The description of the task being replaced or cleared. Truncated to bound log memory. Not present for `"new"` (no previous task). |
+| `newDescription` | string (truncated to 200 chars) | `"new"`, `"change"`, `"refinement"` | The description of the new task. Not present for `"clear"` (no new task). |
 
 **Why descriptions are truncated.** The transition log is a diagnostic summary, not a complete record. Storing full 2000-character descriptions for 20 entries would consume up to 80KB of memory for diagnostics alone — disproportionate for a log that exists to show trajectory, not to reconstruct exact task descriptors. 200 characters captures the essential intent of any reasonable task description.
 
@@ -688,7 +704,7 @@ The detection framework consumes task state metadata — not the task descriptor
 | Signal | Type | Used by |
 |--------|------|---------|
 | `taskDescriptorSet` | boolean | Gap suppression — gap is not detected when no task is set (cl-spec-003 section 6.1) |
-| `graceActive` | boolean | Gap severity capping — severity capped at `watch` during grace period (cl-spec-003 section 6.3) |
+| `gracePeriodActive` | boolean | Gap severity capping — severity capped at `watch` during grace period (cl-spec-003 section 6.3) |
 | `reportsSinceSet` | number | Staleness hint — gap remediation suggests updating the descriptor after 5 reports (cl-spec-003 section 6.5) |
 | `reportsSinceTransition` | number | Grace period countdown — the detection framework reads this to determine whether rate-based severity elevation is suppressed (cl-spec-003 section 6.3) |
 
@@ -696,12 +712,12 @@ The detection framework consumes task state metadata — not the task descriptor
 
 - The detection framework reads these signals at report generation time — when a quality report is requested and pattern detection runs. It does not subscribe to task state changes or receive push notifications. It reads the current values from the task state object.
 - The detection framework does **not** modify task state. It does not reset counters, clear the grace period, or record transitions. It is a read-only consumer.
-- The detection framework can assume that `taskDescriptorSet`, `graceActive`, and the counter values are consistent with each other at the time of reading. Specifically: if `taskDescriptorSet` is false, then `graceActive` is false and both counters are 0 (there is no task to be stale or in grace against).
+- The detection framework can assume that `taskDescriptorSet`, `gracePeriodActive`, and the counter values are consistent with each other at the time of reading. Specifically: if `taskDescriptorSet` is false, then `gracePeriodActive` is false and both counters are 0 (there is no task to be stale or in grace against).
 
 **Data flow:**
 
 ```
-Task Identity ────provides──> taskDescriptorSet, graceActive,
+Task Identity ────provides──> taskDescriptorSet, gracePeriodActive,
                               reportsSinceSet, reportsSinceTransition
 Detection Framework ──reads──> controls gap detection behavior
 ```
@@ -762,7 +778,7 @@ These invariants are guarantees that the implementation must uphold and that con
 
 **3. Defensive setTask.** `setTask` with an identical normalized descriptor is a no-op — no cache invalidation, no transition record, no state change, no preparation recomputation. The only effect is resetting the staleness counter (`reportsSinceSet = 0`). Callers can call `setTask` on every turn with the same descriptor at zero cost. (Section 3.1, same-task classification; section 4.2, ACTIVE → ACTIVE same-task transition.)
 
-**4. Session scope.** Task state is not persisted. Each session starts in the UNSET state with null current and previous tasks, zero counters, empty transition history, and grace inactive. There is no serialization, restoration, or cross-session continuity of task identity. (Section 1, "task identity is not a persistence layer"; section 4.1.)
+**4. Session scope.** Task state is session-scoped by default. Each new session starts in the UNSET state with null current and previous tasks, zero counters, empty transition history, and grace inactive. Task state participates in instance serialization via `snapshot()`/`fromSnapshot()` (cl-spec-014), but does not auto-persist. Without explicit serialization, task state exists only in memory for the duration of the session. (Section 1, "task identity is not a persistence layer"; section 4.1.)
 
 **5. Normalization idempotency.** Normalizing a normalized descriptor produces the identical descriptor — same description string, same keyword array, same origins, same tags. This guarantees that the identity comparison (section 3.2) is a stable equivalence relation. (Section 2.3.)
 
@@ -770,7 +786,7 @@ These invariants are guarantees that the implementation must uphold and that con
 
 **7. Synchronous invalidation.** When `setTask` causes a change or refinement, all cached per-segment relevance scores and the cached quality report are invalidated synchronously within the `setTask` call. There is no deferred invalidation, no dirty flag, no lazy recomputation trigger. When `setTask` returns, the cache is empty and the next quality report will compute fresh scores. (Section 5.1.)
 
-**8. Bounded grace period.** The grace period lasts exactly 2 quality report cycles after a task change, then deactivates. It cannot be extended by caller action, paused, or restarted without another task change. A refinement during an active grace period does not cancel or restart it. Only a new task change restarts it (by resetting `reportsRemainingInGrace` to 2). (Section 5.2.)
+**8. Bounded grace period.** The grace period lasts exactly 2 quality report cycles after a task change, then deactivates. It cannot be extended by caller action, paused, or restarted without another task change. A refinement during an active grace period does not cancel or restart it. Only a new task change restarts it (by resetting `gracePeriodRemaining` to 2). (Section 5.2.)
 
 **9. Advisory staleness.** Staleness does not affect scoring, threshold evaluation, or pattern detection. A stale descriptor produces identical relevance scores to a fresh one. Staleness is metadata — a flag on the task state consumed by gap remediation hints (cl-spec-003 section 6.5) and diagnostics (cl-spec-010). It is not a degradation pattern, does not have severity levels, and does not appear in the pattern list. (Section 5.3.)
 

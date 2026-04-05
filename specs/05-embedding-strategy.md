@@ -2,7 +2,7 @@
 id: cl-spec-005
 title: Embedding Strategy
 type: design
-status: draft
+status: complete
 created: 2026-04-01
 revised: 2026-04-01
 authors: [Akil Abderrahim, Claude Opus 4.6]
@@ -410,7 +410,7 @@ Each cache entry is keyed on a composite of content identity and provider identi
 key = (contentHash, providerName)
 ```
 
-- **`contentHash`** — the same content hash used for segment identity (cl-spec-001 section 2.2). Two segments with identical content have the same hash and share one cache entry. This is the primary deduplication mechanism — if the same tool output appears in three segments, it is embedded once.
+- **`contentHash`** — the same content hash used for segment identity (cl-spec-001 section 3.2). Two segments with identical content have the same hash and share one cache entry. This is the primary deduplication mechanism — if the same tool output appears in three segments, it is embedded once.
 - **`providerName`** — from `metadata.name` on the provider (section 2.2). Including the provider name ensures that embeddings from different providers do not collide. If the caller switches from `"openai:text-embedding-3-small"` to `"openai:text-embedding-3-large"`, the new provider's embeddings do not hit stale cache entries from the old provider.
 
 In trigram mode, the provider name component is the literal string `"trigram"`. Trigram sets are cached in the same structure as embedding vectors — the cache is mode-agnostic at the storage level.
@@ -596,7 +596,7 @@ The critical gap is row 3: semantically related content with different vocabular
 
 This asymmetry is acknowledged in cl-spec-002 section 3.2 and cl-spec-004 section 3.3. The thresholds are configurable (cl-spec-003 section 9.1), and callers using trigram mode may want to adjust them downward. context-lens does not adjust thresholds automatically based on mode — that would create a confusing system where the same score means different things depending on configuration. The scores are what they are; the caller interprets them knowing which mode produced them.
 
-**No cross-mode score comparison.** Scores from a report generated in embedding mode are not comparable to scores from a report generated in trigram mode. A coherence score of 0.7 in one report (embedding) and 0.5 in the next (trigram, due to fallback) does not mean coherence dropped — it means the measurement mode changed. The `similarityMode` field on each report allows the caller to detect this. Trend analysis (cl-spec-003 section 2.5, score deltas) should compare only within the same mode; cross-mode deltas are meaningless.
+**No cross-mode score comparison.** Scores from a report generated in embedding mode are not comparable to scores from a report generated in trigram mode. A coherence score of 0.7 in one report (embedding) and 0.5 in the next (trigram, due to fallback) does not mean coherence dropped — it means the measurement mode changed. The `similarityMode` field on each report allows the caller to detect this. Trend analysis (cl-spec-002 section 9.6, score deltas) should compare only within the same mode; cross-mode deltas are meaningless.
 
 ---
 
@@ -634,7 +634,7 @@ These invariants are guarantees that the implementation must uphold and that con
 | `cl-spec-001` (Segment Model) | Defines content hashing used for embedding cache keys |
 | `cl-spec-002` (Quality Model) | Defines similarity function that consumes embeddings (section 3.2), similarity caching (section 3.2), mode consistency invariant (invariant 13), no-LLM constraint (invariant 9) |
 | `cl-spec-003` (Degradation Patterns) | Pattern thresholds operate on similarity scores produced by the embedding or trigram path |
-| `cl-spec-004` (Task Identity) | Task description embedding (section 6.1), trigram fallback (section 6.2), provider switch handling (section 6.3) |
+| `cl-spec-004` (Task Identity) | Task description embedding (section 6.1), trigram fallback (section 6.2), preparation caching (section 6.3) |
 | `cl-spec-006` (Tokenization Strategy) | Parallel provider abstraction pattern — one required method, optional batch, metadata. Cache structure (LRU, content-hash keyed). Provider switch triggers full recount/recomputation |
 
 ---

@@ -82,6 +82,7 @@ The performance budget covers **context-lens's own computation** — the work pe
 
 - Tokenizer provider calls (`count`, `countBatch`) — see section 7
 - Embedding provider calls (`embed`, `embedBatch`) — see section 7
+- Custom pattern `detect`, `severity`, `explanation`, and `remediation` function execution (caller-provided code, measured separately as `customPatternTime`)
 - Event listener execution time — the caller controls handler complexity
 - Garbage collection pauses — runtime-dependent, not controllable by library code
 - I/O, if any (context-lens performs no I/O, but providers may)
@@ -141,8 +142,12 @@ These operations return pre-computed values or perform hash table lookups. They 
 | `getTask()` | < 1 ms | Returns defensive copy of stored task descriptor |
 | `getTaskState()` | < 1 ms | Returns task lifecycle state |
 | `getGroup(groupId)` | < 1 ms | Hash table lookup by group ID |
+| `getDiagnostics()` | < 1 ms | Assembly from pre-computed state |
+| `getTokenizerInfo()` | < 1 ms | Metadata read |
+| `getEmbeddingProviderInfo()` | < 1 ms | Metadata read |
+| `toJSON()` | < 1 ms | Pure function on single object |
 
-These operations are always within budget regardless of window size. Their cost is dominated by defensive copying (cl-spec-007 section 2.5), which is O(1) for fixed-size structures. `getSegment` returns a single segment — the copy cost is constant, not proportional to window size.
+These operations are always within budget regardless of window size. Their cost is dominated by defensive copying (cl-spec-007 invariant 4), which is O(1) for fixed-size structures. `getSegment` returns a single segment — the copy cost is constant, not proportional to window size.
 
 ### 3.2 Tier 2: Hot-Path Mutations
 
@@ -156,6 +161,7 @@ These operations modify the segment collection and update derived state. They ar
 | `compact(id, summary)` | < 5 ms | Validate (summary shorter), swap content, record continuity ledger entry, update aggregates, invalidate scores, dispatch event |
 | `evict(id)` | < 5 ms | Record pre-eviction snapshot for continuity, transition state, update aggregates, dispatch event. Group eviction: O(m) where m = group size, still < 5 ms for typical groups (m < 20) |
 | `restore(id)` | < 5 ms | Validate evicted state, reinsert at position, update aggregates, record restoration fidelity, invalidate scores, dispatch event |
+| `registerPattern(pattern)` | < 5 ms | Validation + append |
 
 **What makes these fast:** Each mutation touches one segment (or one group), updates O(1) aggregates incrementally (cl-spec-006 section 4.4), and sets invalidation flags on cached scores rather than recomputing them. The expensive work — recomputing quality scores — is deferred to the next `assess()` call. This is the lazy invalidation strategy (cl-spec-002 invariant 10): mutations are cheap because they only mark state dirty; assessment pays the recomputation cost.
 
@@ -231,6 +237,9 @@ These operations are invoked infrequently — typically once per session or in r
 | `listGroups()` | < 1 ms | O(g) where g = group count, typically small. |
 | `getEvictionHistory()` | < 5 ms | O(h) where h = eviction count, bounded by session length. |
 | `setCapacity(n)` | < 1 ms | Update denominator, recompute utilization. O(1). |
+| `snapshot()` | O(n) | Proportional to segment count |
+| `fromSnapshot(data)` | O(n) | Proportional to segment count, plus potential provider recount |
+| `validate(report)` | Proportional | Proportional to output size |
 
 **Provider-dominated operations:**
 
@@ -239,7 +248,7 @@ These operations are invoked infrequently — typically once per session or in r
 | `setTokenizer(provider)` | < 1 ms per segment (cache clear + aggregate rebuild) | Overhead + provider.count() × n |
 | `setEmbeddingProvider(provider)` | < 1 ms per segment (cache clear + similarity invalidation) | Overhead + provider.embed() × n |
 
-Provider switching (cl-spec-005 section 6, cl-spec-006 section 5.2) is a full recount or re-embedding of all active segments. The context-lens overhead — clearing caches, rebuilding aggregates — is O(n) and fast. The total time is dominated by the provider: n calls to `count` or `embed`. For a remote embedding provider at 50ms per call and n = 500, that is 25 seconds (or ~1 second with batching). context-lens cannot budget this — it is the provider's cost. Section 7 addresses this in detail.
+Provider switching (cl-spec-005 section 6, cl-spec-006 section 6.3) is a full recount or re-embedding of all active segments. The context-lens overhead — clearing caches, rebuilding aggregates — is O(n) and fast. The total time is dominated by the provider: n calls to `count` or `embed`. For a remote embedding provider at 50ms per call and n = 500, that is 25 seconds (or ~1 second with batching). context-lens cannot budget this — it is the provider's cost. Section 7 addresses this in detail.
 
 ---
 
@@ -332,6 +341,8 @@ The quality model (cl-spec-002) defers to this spec for the scaling strategies t
 Sampling activates when the **active segment count exceeds 200**. Below this threshold, full O(n^2) computation is performed — at n = 200, the full similarity matrix has 19,900 pairs, which completes within the 500ms cold-start budget even with trigram similarity (~100ms) and well within the 50ms incremental budget with cached values.
 
 The threshold is an internal parameter, not caller-configurable. Exposing it would require the caller to understand the complexity model — a leaky abstraction. context-lens decides when to sample based on its own budget constraints. The caller observes only the resulting scores, which are within the accuracy bounds described in section 5.5.
+
+The sampling seed is computed as FNV-1a hash of the concatenated sorted segment IDs (joined by null byte separator). This ensures deterministic sampling across calls within the same implementation: the same set of segments produces the same sample, regardless of insertion order or wall-clock time.
 
 ### 5.2 Topical Concentration Sampling
 
@@ -535,6 +546,8 @@ Approximate total memory (excluding content strings) for common configurations:
 
 **Key takeaway:** Memory overhead is dominated by the embedding/trigram cache, which is bounded by `embeddingCacheSize` and the embedding dimension. The per-segment overhead (~340 bytes) is negligible even at n = 2,000 (~680KB). Callers who are memory-constrained should tune `embeddingCacheSize` and consider lower-dimensional embeddings — these are the two levers with the highest impact.
 
+Memory is released when the instance is garbage collected. Cache sizes are bounded by construction-time configuration. History buffers are bounded by ring buffer limits (cl-spec-010). No explicit cache-clearing API is provided in v1.
+
 ---
 
 ## 7. Provider Latency Separation
@@ -569,8 +582,11 @@ Every timed operation records two durations:
 |-------------|-----------------|
 | `selfTime` | Time spent in context-lens computation — hash operations, cache lookups, score computation, aggregation, report assembly. This is what the performance budget constrains. |
 | `providerTime` | Time spent waiting for provider calls — `count`, `countBatch`, `embed`, `embedBatch`. This is the caller's cost, measured for transparency. |
+| `customPatternTime` | Time spent executing caller-provided custom pattern functions (`detect`, `severity`, `explanation`, `remediation`). Like `providerTime`, this is caller-provided code and is excluded from budget accountability. The budget tiers apply to `selfTime` only. |
 
-`selfTime + providerTime ≈ totalTime` (the difference is event dispatch and minor overhead). These measurements are available in the per-operation timing records surfaced by diagnostics (cl-spec-010).
+`selfTime + providerTime + customPatternTime ≈ totalTime` (the difference is event dispatch and minor overhead). These measurements are available in the per-operation timing records surfaced by diagnostics (cl-spec-010).
+
+Assessment timing decomposes into `selfTime` (context-lens computation), `providerTime` (tokenizer and embedding calls), and `customPatternTime` (custom pattern function calls). Budget compliance is evaluated against `selfTime` only.
 
 Operations that do not call providers (Tier 1 queries, `evict`, `clearTask`, `setCapacity`) have `providerTime = 0`. Their `selfTime` is the total time.
 
@@ -602,11 +618,14 @@ Every public method invocation is timed. context-lens records:
 | `operation` | string | Method name (e.g., `"add"`, `"assess"`, `"planEviction"`) |
 | `selfTime` | number | Milliseconds spent in context-lens computation |
 | `providerTime` | number | Milliseconds spent in provider calls (tokenizer + embedding) |
+| `customPatternTime` | number | Milliseconds spent in caller-provided custom pattern functions |
 | `totalTime` | number | Wall-clock milliseconds from method entry to return |
 | `segmentCount` | number | Active segment count at operation start |
 | `cacheHits` | number | Similarity cache hits during this operation |
 | `cacheMisses` | number | Similarity cache misses during this operation |
 | `timestamp` | number | High-resolution timestamp (e.g., `performance.now()`) |
+| `budgetExceeded` | boolean | True if selfTime exceeded the budget for this operation's tier |
+| `budgetTarget` | number or null | Budget target in milliseconds for this operation's tier. Null for untimed operations |
 
 Timing is recorded using the runtime's high-resolution timer (`performance.now()` in browsers, `process.hrtime.bigint()` in Node.js). The timer granularity is sub-millisecond on all target platforms.
 
@@ -616,7 +635,7 @@ Timing is recorded using the runtime's high-resolution timer (`performance.now()
 
 context-lens maintains a ring buffer of the most recent timing records — one per public method invocation. The buffer size is fixed at 200 entries. Older entries are overwritten.
 
-The timing history is accessible through diagnostics (cl-spec-010) and through the event system. A `timing` event is dispatched after every timed operation, carrying the timing record. Callers who want to log, aggregate, or alert on timing can subscribe to this event.
+Per-operation timing data is surfaced through two mechanisms: (1) the aggregated `PerformanceSummary` available via `getDiagnostics()` (cl-spec-010 section 6), and (2) a `budgetViolation` event (cl-spec-007 section 9.2) emitted when an operation exceeds its budget tier.
 
 The timing history is not persisted. It exists for the session duration. This matches the session-scoped design of all context-lens state.
 
@@ -625,7 +644,7 @@ The timing history is not persisted. It exists for the session duration. This ma
 A timing record whose `selfTime` exceeds the budget for its operation and segment count is flagged as a **budget violation**. The violation is:
 
 - Recorded in the timing record (`budgetExceeded: true`, `budgetTarget: number`)
-- Included in the `timing` event payload
+- Emitted as a `budgetViolation` event (cl-spec-007 section 9.2)
 - Aggregated in the diagnostics summary (cl-spec-010): count of violations per operation, worst-case selfTime per operation, percentage of operations within budget
 
 **Budget violations are advisory.** They do not throw, do not interrupt the operation, and do not trigger corrective action. They exist to make performance regressions visible — a caller who sees frequent budget violations on `assess()` knows they should investigate (too many segments? slow similarity mode? cache thrashing?).
@@ -680,6 +699,7 @@ These invariants are guarantees that the implementation must uphold. They formal
 | `cl-spec-001` (Segment Model) | Defines segment structure, lifecycle operations, and soft capacity enforcement |
 | `cl-spec-002` (Quality Model) | Defines quality dimensions, scoring algorithms, similarity computation, topical concentration clustering (defers sampling strategy to this spec), and lazy invalidation |
 | `cl-spec-003` (Degradation Patterns) | Defines detection framework and in-budget detection invariant (invariant 10) |
+| `cl-spec-004` (Task Identity) | Defines task descriptor model and lifecycle operations budgeted in section 3.5 |
 | `cl-spec-005` (Embedding Strategy) | Defines embedding provider interface, caching, batch embedding, and provider switching — all with performance implications budgeted here |
 | `cl-spec-006` (Tokenization Strategy) | Defines token counting, caching, batch counting, and incremental aggregate maintenance |
 | `cl-spec-007` (API Surface) | Defines all public operations whose performance is budgeted here; constructor configuration including cache sizes |

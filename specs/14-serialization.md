@@ -88,6 +88,7 @@ The snapshot does **not** include:
 | **Computed quality scores** | Scores are derived from segment content, provider behavior, and task state. They are recomputed on the first `assess()` after restore. Serializing scores would create a consistency risk — scores computed by one provider may differ from scores computed by the restored provider. |
 | **Event handlers** | Closures. Not serializable. The caller re-registers handlers on the restored instance. |
 | **Custom pattern functions** | `detect`, `severity`, `explanation`, `remediation` are functions — not serializable. Only metadata (name, description, priority, strategyHint) is preserved. The caller re-provides custom patterns on restore. |
+| **Performance metrics** | Diagnostic counters (operation timings, cache hit rates, budget violation counts) are session-specific measurements. They are reset on restore. |
 
 **Why not serialize caches as an optimization?** The embedding cache is the largest in-memory structure (cl-spec-009 §6). Pre-populating it on restore would avoid re-embedding all segments. But: (1) embedding vectors are provider-specific — if the provider changes on restore, cached vectors are invalid; (2) the cache is an LRU with bounded size — serializing it faithfully requires preserving access order, not just entries; (3) the snapshot size would increase dramatically (potentially 100MB+ for large windows with high-dimensional embeddings). The cost–benefit is unfavorable. Caches rebuild naturally as the instance is used after restore.
 
@@ -155,7 +156,7 @@ A caller who wants a quality timeline can take a snapshot after each `assess()` 
 | `providerMetadata` | ProviderMetadataSnapshot | Tokenizer and embedding metadata at snapshot time (section 4.3). |
 | `segments` | SerializedSegment[] | All segments in position order (section 4.4). |
 | `groups` | SerializedGroup[] | All groups (section 4.5). |
-| `taskState` | TaskState | Full task lifecycle state (cl-spec-007 §5.4). |
+| `taskState` | TaskState | Full internal task state including descriptor, lifecycle, counters, grace period, and transition history (cl-spec-004 section 4.4). Includes transition history (cl-spec-004 section 5.4) as part of the serialized task state. |
 | `baseline` | BaselineSnapshot or null | Quality baseline (cl-spec-007 §6.2). |
 | `continuityLedger` | ContinuityEvent[] | Full continuity audit trail. |
 | `patternTracking` | PatternTrackingSnapshot | Per-pattern detection state and history (section 4.6). |
@@ -179,6 +180,8 @@ A caller who wants a quality timeline can take a snapshot after each `assess()` 
 | `hysteresisMargin` | number | Hysteresis margin. |
 | `tokenCacheSize` | integer | Token cache LRU size. |
 | `embeddingCacheSize` | integer | Embedding cache LRU size. |
+
+The `customPatterns` configuration field is not included in SerializedConfig. Custom pattern metadata is serialized separately (section 4.7) because pattern functions are not serializable (section 2.2).
 
 ### 4.3 ProviderMetadataSnapshot
 
@@ -243,6 +246,7 @@ This metadata enables change detection on restore (section 5.3). The restore pro
 | `reportCount` | integer | Consecutive reports active. |
 | `scoreHistory` | object[] | Recent primary scores (capped at 20). |
 | `consecutiveNulls` | integer | For custom patterns: consecutive null detect returns (section 10.6 of cl-spec-003). |
+| `resolvedAt` | number or null | When the pattern resolved in its current cycle. Null if currently active. |
 
 This is the hysteresis state that the detection framework maintains between `assess()` calls. Without it, the first `assess()` after restore would not have the context needed for hysteresis — patterns could flicker on the restore boundary.
 
@@ -336,6 +340,9 @@ After restore, the instance is fully functional:
 - **All mutation operations** (`add`, `update`, `evict`, etc.) work normally. The restored instance is not read-only.
 - **The timeline and history continue** from where the snapshot left off. New events are appended after the restored timeline entries. The timeline sequence numbers continue from the snapshot's highest sequence number + 1.
 - **`getDiagnostics()`** returns a snapshot that includes both pre-restore history (from the snapshot) and post-restore activity.
+- **`getDiagnostics().latestReport`** is null until the first `assess()` call, even if the original instance had generated reports. Quality reports are not serialized — they are recomputed on demand.
+
+**External integrations.** Event handlers, fleet registrations, and OTel exporter subscriptions are not serialized or restored. Callers must re-attach these after `fromSnapshot()`. The restored instance's event system starts with no subscribers.
 
 ---
 

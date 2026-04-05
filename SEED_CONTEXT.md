@@ -208,18 +208,49 @@ Key decisions made in Spec 13:
 
 ## What's next
 
-**All 14 design specs are drafted. All 5 amendments are complete. All 12 open questions (OQ-001 through OQ-012) are resolved.**
+**Design spec review is COMPLETE. All 14 specs reviewed, reconciled, and amended. Ready for implementation specs.**
 
-The design spec phase is complete. The next step is **design spec review**, followed by **implementation specs**.
+### Review progress
 
-**Start here:** `REVIEW.md` — the review guide. It defines 5 review passes (per-spec internal consistency, cross-spec type consistency, invariant compatibility, coverage gaps, API surface completeness), a 40-entry master type registry with 8 known tensions to check, ~160 invariants to cross-validate, and the review deliverable format.
+**Phase 1 — Internal Consistency (Pass 1): COMPLETE (2026-04-05)**
 
-See `REVIEW.md` for the full spec inventory, dependency graph, session log, and review process.
+All 14 specs reviewed for internal consistency (section references, table/prose agreement, invariant numbering, TOC, frontmatter). ~100 findings identified and fixed across 7 batches in dependency order. Key resolutions:
+
+- **7 blockers resolved:** protectionRelevance formula rewritten (spec 02), serialization carve-outs added to specs 03/04, setTask returns TaskTransition (spec 04→07 reconciled), saturation eviction weights fixed to sum to 1.0 (spec 08), TransitionType unified to 5-value enum, TaskLifecycleState standardized to lowercase
+- **TaskState reconciled:** canonical 14-field type adopted across specs 04, 07, 11. Field names harmonized (`currentTask`, `previousTask`, `gracePeriodActive`, `gracePeriodRemaining`, `transitionHistory`, `lastTransition`, `stale`)
+- **QualityReport expanded:** field renamed to `continuity` (not `continuityLedger`), four fields added to spec 02 (`rawScores`, `embeddingMode`, `patterns`, `task`)
+- **API catalog completed:** `getDiagnostics`, `planEviction`, formatting utilities added to spec 07. Two new events (`reportGenerated`, `budgetViolation`) added. API categories updated from 7 to 11.
+- **Timeline reconciled:** 5 missing event types added to specs 10/11. Timeline documented as superset of API events.
+- **14 wrong section references corrected** (spec 08 renumbering after §5.3 amendment, spec 04→01 refs)
+- **All frontmatter statuses updated** (specs 01–06 now `complete`, amended specs annotated)
+
+Findings and details: `REVIEW_FINDINGS.md`
+
+**Phase 2 — Cross-Cutting Analysis (Passes 2–5): COMPLETE (2026-04-05)**
+
+Four sweeps executed across 14 specs. 26 findings (R-165 through R-190). Key results:
+
+- **1 blocker found:** recency/age formulas use wall-clock time while invariants claim determinism (R-177). Proposed fix: use `report.timestamp` instead of `current time`.
+- **32 types verified consistent** across defining and consuming specs. Only field-level issues: Segment/Group `state` fields missing from spec 01 core tables (R-170, R-172), and number/integer convention drift (R-174/R-175).
+- **5 invariant chains traced:** Determinism chain breaks at recency formulas. Atomic-vs-fail-open compatible. Read-only consumers compatible under narrow definition (needs explicit wording). Snapshot isolation fully compatible. Performance budget + custom patterns need timing carve-out.
+- **API surface 12/12 checks pass.** All public operations, 24 events, 13 error types present in spec 07.
+- **5 coverage gaps documented:** no instance disposal, concurrency undefined, memory release unguided, fleet serialization unsupported, OTel exporter not re-attached after restore.
+- **4 decisions resolved:** recency uses assessmentTimestamp, customPatternTime added as third timing category, read-only consumer definition standardized, number/integer convention noted in spec 11.
+
+**Phase 3 — Deliverables: COMPLETE (2026-04-05)**
+
+- 32 amendments applied across 12 specs in dependency order
+- Type reconciliation table: 36 types, 7 reconciled, 29 verified consistent, 0 remaining discrepancies
+- All blockers resolved (8 total across Phases 1–2). All types reconciled. API surface complete. Invariant chains verified.
+- **Sign-off: the design spec corpus is internally consistent and ready for implementation spec writing.**
+
+**Findings and details:** `REVIEW_FINDINGS.md` — all findings across Phases 1–3 with resolutions, amendment log, type reconciliation table, and sign-off.
 
 ## Files to read on pickup
 
-1. `REVIEW.md` — review guide, spec inventory, dependency graph, architectural decisions, session log
-2. `specs/01-segment-model.md` — completed Spec 1 (the foundation)
+1. `REVIEW.md` — review guide with execution plan, spec inventory, dependency graph, architectural decisions, session log
+2. `REVIEW_FINDINGS.md` — all findings (Phases 1–3) with resolutions, amendment log, type reconciliation table, sign-off
+3. `specs/01-segment-model.md` — completed Spec 1 (the foundation)
 3. `specs/06-tokenization-strategy.md` — completed Spec 6 (token counting, provider abstraction, caching)
 4. `specs/02-quality-model.md` — completed Spec 2 (four quality dimensions, scoring mechanics, baseline, reports)
 5. `specs/03-degradation-patterns.md` — completed Spec 3, amended (five degradation patterns, detection framework, pattern interactions, custom pattern registration §10)

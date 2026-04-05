@@ -2,7 +2,7 @@
 id: cl-spec-008
 title: Eviction Advisory
 type: design
-status: draft
+status: draft (amended)
 created: 2026-04-02
 revised: 2026-04-04
 authors: [Akil Abderrahim, Claude Opus 4.6]
@@ -109,7 +109,7 @@ The advisory sits between diagnosis and action. It transforms "here is what is w
 
 ## 2. Ranking Model
 
-Every eviction plan begins with a ranked list. The ranking model takes all evictable segments, scores each one on how suitable it is for eviction, and sorts them from best candidate (evict first) to worst candidate (evict last). The plan then walks this list until the reclamation target is met.
+Every eviction plan begins with a ranked list. The ranking model takes all evictable segments, scores each one on how suitable it is for eviction, and sorts them from best candidate (evict first) to worst candidate (evict last). The plan then walks this list until the reclamation target is met. The advisory's candidate pool corresponds to `managedTokens` from the capacity report (cl-spec-006 section 4.5), defined as `totalActiveTokens - pinnedTokens`. This includes seed segments, which are evictable-last but still part of the managed pool.
 
 The ranking model is **not** the composite quality score from cl-spec-002 section 8. The composite answers "how healthy is this segment?" The eviction score answers a different question: "how cheaply can this segment be removed?" A segment with a high composite score — healthy, relevant, unique — is expensive to remove. A segment with a low composite score might still be expensive to remove if it bridges two topical clusters. The eviction score captures removal cost, not current quality.
 
@@ -178,7 +178,7 @@ This is the caller's explicit declaration of value. The advisory respects it as 
 ageRetention(i) = 1.0 - (age(i) / maxAge)
 ```
 
-Where `age(i)` is `now - max(segment.createdAt, segment.updatedAt)` and `maxAge` is the age of the oldest active segment. The most recent segment scores 1.0 (high retention value — prefer to keep it). The oldest scores 0.0 (low retention value — acceptable to remove). This mirrors the recency signal in relevance scoring (cl-spec-002 section 5.5) but serves a different purpose: relevance recency estimates task-relatedness; age retention estimates temporal value for eviction.
+Where `age(i)` is `assessmentTimestamp - max(segment.createdAt, segment.updatedAt)` and `maxAge` is the age of the oldest active segment. The `assessmentTimestamp` is the quality report's timestamp, established at the start of each `assess()` call. Age computation does not depend on the system clock. The most recent segment scores 1.0 (high retention value — prefer to keep it). The oldest scores 0.0 (low retention value — acceptable to remove). This mirrors the recency signal in relevance scoring (cl-spec-002 section 5.5) but serves a different purpose: relevance recency estimates task-relatedness; age retention estimates temporal value for eviction.
 
 ### 2.3 Weights
 
@@ -201,7 +201,7 @@ The default weights (section 2.3) apply when no degradation pattern is driving t
 | Strategy | `w_r` | `w_d` | `w_c` | `w_i` | `w_a` | Rationale |
 |----------|-------|-------|-------|-------|-------|-----------|
 | Default | 0.30 | 0.25 | 0.20 | 0.15 | 0.10 | Balanced |
-| Saturation-driven | 0.20 | 0.25 | 0.15 | 0.15 | 0.10 | Tokens matter most — lower relevance weight because the goal is space, not focus. Age weight unchanged. Remaining 0.15 distributed: +0.05 to `w_d`, +0.05 to `w_a`, +0.05 to token-size preference (see below). |
+| Saturation-driven | 0.20 | 0.30 | 0.15 | 0.15 | 0.20 | Tokens matter most — lower relevance weight because the goal is space, not focus. Information loss and age each gain 0.05 from the relevance reduction, and coherence is reduced by 0.05. Token-size preference applies as a tie-breaking sort rule (see below), not as a weight. |
 | Erosion-driven | 0.20 | 0.40 | 0.15 | 0.15 | 0.10 | Redundancy is the problem — amplify information loss signal to target duplicates. |
 | Gap-driven | 0.45 | 0.20 | 0.10 | 0.15 | 0.10 | Irrelevance is the problem — amplify relevance to target off-task content. Coherence demoted because off-task content may bridge off-task topics, and removing those bridges is acceptable. |
 | Collapse-driven | 0.25 | 0.25 | 0.25 | 0.15 | 0.10 | Continuity is already damaged — prioritize coherence preservation to prevent compounding loss. |
@@ -345,6 +345,7 @@ Generates an eviction plan based on the current window state. This method is exp
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `schemaVersion` | string | Schema version identifier (cl-spec-011). Present on all top-level output types. |
 | `planId` | string | Auto-generated unique identifier. |
 | `timestamp` | timestamp | When the plan was generated. |
 | `strategy` | `StrategyName` | Which strategy produced this plan (section 5). |
@@ -384,7 +385,7 @@ Each candidate in the plan carries everything the caller needs to make an inform
 | `scores` | `CandidateScores` | The quality scores that drove the ranking. |
 | `impact` | `CandidateImpact` | Projected quality impact of evicting this specific candidate. |
 | `recommendation` | `"evict"` or `"compact"` | Whether the advisory recommends eviction or compaction for this candidate. |
-| `compaction` | `CompactionRecommendation` or `null` | If `recommendation` is `"compact"`, the compaction details (section 9). `null` if eviction is recommended. |
+| `compaction` | `CompactionRecommendation | CompactionRecommendation[] | null` | If `recommendation` is `"compact"`, the compaction details (section 9). Array for group candidates (section 9.5), single object for segment candidates. `null` if eviction is recommended. |
 | `memberIds` | `string[]` or `null` | For group candidates, the ordered list of member segment IDs. `null` for individual segments. |
 | `reason` | string | Human-readable explanation of why this candidate was selected and ranked here. |
 
@@ -485,7 +486,7 @@ A strategy influences the eviction plan through three mechanisms:
 
 2. **Behavioral rules.** Some strategies impose rules that cannot be expressed as weight adjustments. These are tie-breaking preferences, recommendation biases (evict vs. compact), or candidate annotations that carry information beyond the eviction score. Each named strategy's behavioral rules are defined in sections 5.4–5.7.
 
-3. **Candidate filtering.** In rare cases, a strategy may filter candidates that would otherwise appear. The collapse strategy, for example, suppresses candidates whose eviction would push continuity below the collapse critical threshold (section 5.7). Filtering is conservative — a strategy removes candidates only when including them would be actively counterproductive, not merely suboptimal.
+3. **Candidate filtering.** In rare cases, a strategy may filter candidates that would otherwise appear. The collapse strategy, for example, suppresses candidates whose eviction would push continuity below the collapse critical threshold (section 5.8). Filtering is conservative — a strategy removes candidates only when including them would be actively counterproductive, not merely suboptimal.
 
 A strategy does **not** control:
 - Protection tier ordering. Tiers are hard constraints (section 3). No strategy can promote a `default` segment above a `priority(n)` segment or skip the seed compaction-first rule.
@@ -512,7 +513,7 @@ Compound patterns represent specific co-occurrences where the optimal strategy d
 | `fullOfWrongThings` | Saturation + Gap | `"gap"` | The window is full of irrelevant content. Generic capacity-focused eviction (the saturation strategy) would reclaim tokens without regard for relevance and might remove the few relevant segments that remain. The gap strategy's amplified relevance signal ensures irrelevant content is evicted first. |
 | `scatteredAndIrrelevant` | Fracture + Gap | `"gap"` | Content is both disconnected and irrelevant. Restructuring (fracture's natural remedy) is pointless when the content being restructured serves no task purpose. The gap strategy removes irrelevant content first; once what remains is relevant, coherence can be addressed in a subsequent plan-execute-replan cycle. |
 | `lossDominates` | Collapse + any | `"collapse"` | When collapse is active alongside another pattern, the irreversibility of information loss takes precedence. The collapse strategy prioritizes coherence preservation and prefers compaction over eviction, reducing the risk of deepening the loss. |
-| `pressureLoop` | Collapse + Saturation | `"collapse"` | This is the hardest compound — restoring content worsens saturation, evicting content deepens collapse. The collapse strategy is selected because further information loss is the less reversible harm. The strategy's preference for compaction over eviction (section 5.7) creates room through zero-loss operations, which is the compound's recommended escape path. |
+| `pressureLoop` | Collapse + Saturation | `"collapse"` | This is the hardest compound — restoring content worsens saturation, evicting content deepens collapse. The collapse strategy is selected because further information loss is the less reversible harm. The strategy's preference for compaction over eviction (section 5.8) creates room through zero-loss operations, which is the compound's recommended escape path. |
 | `triplePressure` | Saturation + Erosion + Gap | `"gap"` | The window is full, redundant, and irrelevant. The gap strategy's heavy relevance weighting (0.45) targets content that is both irrelevant and redundant first — these candidates score low on both relevance retention and information loss, making them ideal eviction targets that address all three patterns simultaneously. |
 
 **Compound precedence.** If multiple compounds are detected simultaneously (possible only with three or more active patterns — e.g., saturation + erosion + gap activates both `fullOfJunk` and `triplePressure`), the advisory selects the compound with the most participating patterns. Ties are broken by the highest-priority pattern among participants (cl-spec-003 section 8.3, lower priority number wins). In practice, the `triplePressure` compound subsumes `fullOfJunk` and `fullOfWrongThings` when all three patterns are active.
@@ -529,7 +530,7 @@ If no compound is detected (either because only one pattern is active or because
 | 4 | Erosion | `"erosion"` |
 | 5 | Fracture | `"default"` |
 
-Fracture maps to `"default"` because it has no dedicated strategy (section 5.8). When fracture is the only active pattern, balanced eviction is the best the advisory can offer — fracture's true remedy is restructuring, not eviction.
+Fracture maps to `"default"` because it has no dedicated strategy (section 5.9). When fracture is the only active pattern, balanced eviction is the best the advisory can offer — fracture's true remedy is restructuring, not eviction.
 
 **Custom pattern handling.** Custom patterns (cl-spec-003 section 10) participate in Phase 3 but not Phase 2.
 
@@ -570,7 +571,7 @@ Saturation means the window is running out of room. The saturation strategy opti
 - Auto-selection with saturation as the highest-priority active pattern (and no compound override).
 - Explicit `strategy: "saturation"` from the caller.
 
-**Weight profile:** See section 2.4, saturation row. Relevance is demoted (0.20 from 0.30) because the goal is space, not focus. Information loss remains at 0.25 — redundant content is still the cheapest to remove even under capacity pressure. Coherence is demoted (0.15 from 0.20) because some coherence loss is acceptable when the alternative is being unable to add new content at all.
+**Weight profile:** See section 2.4, saturation row. Relevance is demoted (0.20 from 0.30) because the goal is space, not focus. Information loss is elevated (0.30 from 0.25) — redundant content is the cheapest to remove under capacity pressure, so the signal is amplified. Coherence is demoted (0.15 from 0.20) because some coherence loss is acceptable when the alternative is being unable to add new content at all. Age is elevated (0.20 from 0.10) to prefer evicting older content when reclaiming capacity.
 
 **Behavioral rules:**
 
@@ -664,9 +665,9 @@ Section 5.3 defined which compound maps to which strategy. This section explains
 
 **Why `fullOfJunk` selects erosion over saturation.** Pattern priority (cl-spec-003 section 8.3) ranks saturation above erosion. If the advisory used simple priority-based selection, `fullOfJunk` would resolve to `"saturation"`. But the compound's remediation shift says "deduplicate first" — and deduplication is erosion's domain. The erosion strategy's amplified information-loss weight (0.40) targets the redundant content that is causing both the capacity pressure and the density degradation. The saturation strategy's token-size preference would target large segments regardless of redundancy, potentially removing unique content that happens to be large. The compound override is the advisory's way of heeding the compound's more nuanced diagnosis over the blunt priority ordering.
 
-**Why `pressureLoop` selects collapse, not a hybrid.** The pressure loop — collapse + saturation — presents a genuine dilemma: eviction deepens collapse, but not evicting maintains saturation. The collapse strategy is selected because information loss is less reversible than capacity pressure. Capacity pressure can be relieved by compaction (zero information loss), by the caller adding less content, or by increasing capacity. Information loss can only be partially recovered through restoration, and restoration itself requires capacity. The collapse strategy's compaction-over-eviction bias (section 5.7, rule 1) is the mechanism that breaks the loop — compaction frees tokens (relieving saturation) without removing content (preventing further collapse).
+**Why `pressureLoop` selects collapse, not a hybrid.** The pressure loop — collapse + saturation — presents a genuine dilemma: eviction deepens collapse, but not evicting maintains saturation. The collapse strategy is selected because information loss is less reversible than capacity pressure. Capacity pressure can be relieved by compaction (zero information loss), by the caller adding less content, or by increasing capacity. Information loss can only be partially recovered through restoration, and restoration itself requires capacity. The collapse strategy's compaction-over-eviction bias (section 5.8, rule 1) is the mechanism that breaks the loop — compaction frees tokens (relieving saturation) without removing content (preventing further collapse).
 
-**Compound vs. single-pattern priority: when they disagree.** The compound resolution in phase 2 of auto-selection (section 5.3) takes precedence over the priority-based fallback in phase 3. This means a window with active collapse and active erosion — where collapse has priority 1 and erosion has priority 4 — resolves to `"collapse"` via phase 3 (no `lossDominates` compound because erosion is not covered by `lossDominates`, which requires collapse + any non-erosion pattern). But a window with active saturation and active erosion — where saturation has priority 2 and erosion has priority 4 — resolves to `"erosion"` via the `fullOfJunk` compound in phase 2, overriding saturation's higher priority.
+**Compound vs. single-pattern priority: when they disagree.** The compound resolution in phase 2 of auto-selection (section 5.3) takes precedence over the priority-based fallback in phase 3. This means a window with active collapse and active erosion — where collapse has priority 1 and erosion has priority 4 — resolves to `"collapse"` via the `lossDominates` compound in phase 2, which requires collapse + any pattern (including erosion). The collapse strategy is selected because information loss takes precedence. But a window with active saturation and active erosion — where saturation has priority 2 and erosion has priority 4 — resolves to `"erosion"` via the `fullOfJunk` compound in phase 2, overriding saturation's higher priority.
 
 This is correct behavior, not an inconsistency. Compounds carry semantic information that priority alone does not: the combination of saturation + erosion is not just "saturation is the bigger problem" — it is "the saturation is caused by the erosion, so fixing erosion fixes both." The compound encodes this causal insight; the priority ordering does not.
 
@@ -887,7 +888,7 @@ This is the correct behavior. Without a task, the advisory cannot make relevance
 
 When a task is active, relevance differentiates candidates. Segments with low relevance — content that does not serve the current task — rank as better eviction targets. Segments with high relevance resist eviction. This is the advisory's primary value proposition: quality-aware eviction that targets the right content, not just the oldest or largest.
 
-**Relevance amplification under the gap strategy.** When the gap pattern is active and the gap strategy is selected (section 5.6), relevance's weight increases to 0.45 — nearly half the eviction score. This makes the advisory aggressive about removing irrelevant content. The gap strategy's behavioral rules (section 5.6) add further refinements: coherence penalty suppression for low-relevance candidates, relevance-band annotations, and task-transition caution.
+**Relevance amplification under the gap strategy.** When the gap pattern is active and the gap strategy is selected (section 5.7), relevance's weight increases to 0.45 — nearly half the eviction score. This makes the advisory aggressive about removing irrelevant content. The gap strategy's behavioral rules (section 5.7) add further refinements: coherence penalty suppression for low-relevance candidates, relevance-band annotations, and task-transition caution.
 
 **Metadata relevance signals.** The per-segment relevance score computed by the quality model (cl-spec-002 section 5.5) incorporates not just content-to-task similarity but also metadata signals:
 
@@ -904,7 +905,7 @@ When the caller has recently changed the task (cl-spec-004 section 5), the grace
 
 **Advisory behavior during the grace period:**
 
-The advisory does not suppress or modify its ranking during the grace period. If the caller calls `planEviction` during the grace period, the plan is generated normally using current relevance scores. The gap strategy's task-transition caution (section 5.6, rule 3) annotates the plan with a warning, but the ranking is unmodified.
+The advisory does not suppress or modify its ranking during the grace period. If the caller calls `planEviction` during the grace period, the plan is generated normally using current relevance scores. The gap strategy's task-transition caution (section 5.7, rule 3) annotates the plan with a warning, but the ranking is unmodified.
 
 This is intentional. The grace period is a diagnostic mechanism — it prevents the gap pattern from alarming the caller during a transition. But if the caller explicitly requests an eviction plan during the grace period, they have made a conscious decision to act on the current state. The advisory should not second-guess this by silently altering the plan. The annotation surfaces the risk; the caller decides whether to proceed.
 
@@ -953,7 +954,7 @@ Compaction is recommended instead of eviction when all of the following conditio
 
 4. **The `includeCompactionAlternatives` option is true (default).** The caller can disable compaction recommendations entirely by passing `includeCompactionAlternatives: false` in `PlanOptions` (section 4.1). When disabled, the advisory recommends eviction for all candidates except seeds (which still receive compaction-first treatment due to the protection rule).
 
-5. **Strategy-specific bias permits it.** The saturation strategy biases toward eviction (section 5.5, rule 2) because it needs certain token reclamation. The collapse strategy biases toward compaction (section 5.7, rule 1) because it needs to minimize information loss. The erosion strategy recommends compaction for moderate redundancy (section 5.6, rule 3). The default and gap strategies have no bias.
+5. **Strategy-specific bias permits it.** The saturation strategy biases toward eviction (section 5.5, rule 2) because it needs certain token reclamation. The collapse strategy biases toward compaction (section 5.8, rule 1) because it needs to minimize information loss. The erosion strategy recommends compaction for moderate redundancy (section 5.6, rule 3). The default and gap strategies have no bias.
 
 ### 9.2 CompactionRecommendation Structure
 
@@ -1027,7 +1028,7 @@ The following matrix summarizes the recommendation logic across strategies and c
 | Non-seed, savings below target | Evict | Evict | Evict | Evict | Compact (if feasible) |
 | Non-seed, already compacted | Evict | Evict | Evict | Evict | Evict |
 
-The collapse strategy is the most compaction-biased — it recommends compaction in nearly all cases where the segment is not already compacted and the savings exceed the 20% minimum threshold (section 5.7, rule 1). The saturation strategy is the most eviction-biased — it recommends eviction in nearly all cases because it needs certain reclamation (section 5.5, rule 2).
+The collapse strategy is the most compaction-biased — it recommends compaction in nearly all cases where the segment is not already compacted and the savings exceed the 20% minimum threshold (section 5.8, rule 1). The saturation strategy is the most eviction-biased — it recommends eviction in nearly all cases because it needs certain reclamation (section 5.5, rule 2).
 
 ### 9.7 What the Advisory Does Not Do
 
@@ -1037,7 +1038,7 @@ The advisory does not generate summaries. It does not call LLMs. It does not eva
 
 The following invariants hold for the eviction advisory. They are not aspirational — they are constraints that the implementation must enforce. Violations indicate bugs, not edge cases.
 
-**Invariant 1: Read-only consumer.** The eviction advisory does not modify the context window. It does not evict segments, compact segments, update metadata, change protection tiers, reorder segments, or mutate any state owned by the segment model, quality model, or task identity system. `planEviction` is a pure function of the current window state — it reads and returns, but does not write. The only state the advisory produces is the `EvictionPlan` data object, which is returned to the caller and has no connection to the instance.
+**Invariant 1: Read-only consumer.** The eviction advisory does not call segment-mutating methods (`add`, `update`, `replace`, `compact`, `split`, `evict`, `restore`) or configuration-mutating methods (`setTask`, `clearTask`, `setTokenizer`, `setEmbeddingProvider`). It may call `assess()` to obtain fresh quality data, which updates internal caches but does not modify segments or configuration.
 
 *Clarification:* `planEviction` may trigger a quality report generation (section 4.1, step 1) if the cached report is stale. Quality report generation is a read-derive-cache operation within the quality model (cl-spec-002), not a window mutation. The advisory delegates this to `assess`, which is already defined as non-mutating (cl-spec-007).
 

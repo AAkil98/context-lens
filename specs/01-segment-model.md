@@ -2,9 +2,9 @@
 id: cl-spec-001
 title: Segment Model
 type: design
-status: draft
+status: complete
 created: 2026-03-24
-revised: 2026-03-24
+revised: 2026-04-05
 authors: [Akil Abderrahim, Claude Opus 4.6]
 tags: [segment, core, data-model, lifecycle, grouping, protection]
 depends_on: []
@@ -64,7 +64,7 @@ context-lens enforces only structural constraints on segments, not semantic ones
 
 1. **Non-empty.** A segment must contain at least one token of content.
 2. **Non-overlapping.** Within a context window, no token belongs to more than one segment. Segments partition the content they cover — but they need not cover the entire window (gaps are allowed if the caller manages some content outside context-lens).
-3. **Ordered.** Segments maintain insertion order. This order is used by coherence scoring (adjacent-segment similarity) and is preserved across lifecycle operations.
+3. **Ordered.** Segments maintain insertion order. This order is used by coherence scoring (adjacent-segment similarity) and is preserved across lifecycle operations. Segments maintain an internal position index reflecting insertion order. This index is not exposed in the public API but is preserved in serialized snapshots (cl-spec-014 section 4.4).
 4. **Self-contained identity.** A segment's identity does not depend on its position. Moving, evicting, or restoring a segment does not change its ID.
 
 ### 2.3 Splitters (Optional Utilities)
@@ -149,6 +149,7 @@ These fields exist on every segment. context-lens populates them automatically i
 | `updatedAt` | timestamp | same as `createdAt` | Last modification time (updated on `update`, `replace`, `compact`) |
 | `protection` | protection level | `default` | Protection tier (section 6) |
 | `importance` | number (0.0–1.0) | `0.5` | Caller-assigned priority weight. Higher = harder to evict |
+| `state` | "active" \| "evicted" | Segment lifecycle state. Starts as "active"; transitions to "evicted" via evict operation (section 7.7). Restored segments return to "active" (section 7.8). |
 
 ### 4.2 Origin Tag
 
@@ -210,11 +211,12 @@ Groups are first-class objects with their own identity:
 |-------|------|-------------|
 | `groupId` | string | Unique identifier (same constraints as segment IDs, section 3.1) |
 | `members` | string[] | Ordered list of segment IDs belonging to this group |
-| `protection` | protection level | Group-level protection (overrides member-level; see section 5.3) |
+| `protection` | protection level | Group-level protection (overrides member-level; see section 5.2) |
 | `importance` | number (0.0–1.0) | Group-level importance (overrides member-level for eviction ranking) |
 | `origin` | string or null | Optional provenance for the group as a whole |
 | `tags` | string[] | Caller-defined labels |
 | `createdAt` | timestamp | When the group was formed |
+| `state` | "active" \| "dissolved" | Group lifecycle state. Starts as "active"; set to "dissolved" when dissolved via dissolveGroup. |
 
 Groups are created explicitly by the caller — context-lens does not infer grouping. A segment may belong to **at most one group**. Attempting to add a segment to a second group is an error; the caller must remove it from the first group before reassigning.
 
@@ -226,7 +228,7 @@ context-lens computes aggregate properties from a group's members:
 
 | Property | Aggregation | Description |
 |----------|-------------|-------------|
-| `tokenCount` | sum of members | Total tokens consumed by the group |
+| `tokenCount` | sum of members | Total tokens consumed by the group. tokenCount is a computed aggregate (sum of member token counts), not a caller-settable property. It is returned by `getGroup()` (cl-spec-007 section 4.3) and included in serialized snapshots. |
 | `importance` | explicit group value, or max of members if unset | The group is as important as its most important member unless the caller overrides |
 | `protection` | explicit group value, or max of members if unset | The group inherits the strongest protection of any member unless the caller overrides |
 | `coherence` | computed by quality model | Internal coherence among group members (cl-spec-002) |

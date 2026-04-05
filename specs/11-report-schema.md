@@ -7,7 +7,7 @@ created: 2026-04-04
 revised: 2026-04-04
 authors: [Akil Abderrahim, Claude Opus 4.6]
 tags: [schema, json, serialization, versioning, interoperability, output-format]
-depends_on: [cl-spec-002, cl-spec-003, cl-spec-007, cl-spec-008, cl-spec-010]
+depends_on: [cl-spec-002, cl-spec-003, cl-spec-004, cl-spec-006, cl-spec-007, cl-spec-008, cl-spec-010]
 ---
 
 # Report Schema
@@ -431,7 +431,7 @@ Lightweight task state for inclusion in QualityReport.
 
 | Field | JSON type | Required | Nullable | Constraints | Description |
 |-------|-----------|----------|----------|-------------|-------------|
-| `state` | TaskLifecycleState | yes | no | | `"UNSET"` or `"ACTIVE"`. |
+| `state` | TaskLifecycleState | yes | no | | `"unset"` or `"active"`. |
 | `stale` | boolean | yes | no | | True if 5+ quality reports without a `setTask` call. |
 | `gracePeriodActive` | boolean | yes | no | | True if within the 2-report grace period. |
 | `gracePeriodRemaining` | integer | yes | no | 0, 1, or 2 | Reports remaining in grace period. |
@@ -450,18 +450,22 @@ Full task lifecycle state for inclusion in DiagnosticSnapshot.
 
 | Field | JSON type | Required | Nullable | Constraints | Description |
 |-------|-----------|----------|----------|-------------|-------------|
-| `state` | TaskLifecycleState | yes | no | | `"UNSET"` or `"ACTIVE"`. |
-| `currentTask` | TaskDescriptor | yes | yes | | Current task descriptor. `null` if UNSET. |
+| `state` | TaskLifecycleState | yes | no | | `"unset"` or `"active"`. |
+| `currentTask` | TaskDescriptor | yes | yes | | Current task descriptor. `null` if unset. |
 | `previousTask` | TaskDescriptor | yes | yes | | Previous task descriptor. `null` if no prior transition. |
+| `taskSetAt` | number | yes | yes | | Timestamp (epoch ms) when the current task was set. `null` if unset. |
 | `transitionCount` | integer | yes | no | ≥ 0 | Total state-changing transitions. |
 | `changeCount` | integer | yes | no | ≥ 0 | Transitions classified as task changes. |
 | `refinementCount` | integer | yes | no | ≥ 0 | Transitions classified as refinements. |
 | `reportsSinceSet` | integer | yes | no | ≥ 0 | Reports since last `setTask` call. |
 | `reportsSinceTransition` | integer | yes | no | ≥ 0 | Reports since last real transition. |
-| `graceActive` | boolean | yes | no | | True during the 2-report grace period. |
-| `reportsRemainingInGrace` | integer | yes | no | 0, 1, or 2 | Grace period countdown. |
-| `stale` | boolean | yes | no | | True if `reportsSinceSet ≥ 5`. |
 | `lastTransition` | TaskTransition | yes | yes | | Most recent transition. `null` if no transitions. |
+| `stale` | boolean | yes | no | | True if `reportsSinceSet ≥ 5`. |
+| `gracePeriodActive` | boolean | yes | no | | True during the 2-report grace period. |
+| `gracePeriodRemaining` | integer | yes | no | 0, 1, or 2 | Grace period countdown. |
+| `transitionHistory` | TransitionEntry[] | yes | no | | Chronological history of task transitions. |
+
+TransitionEntry is defined in cl-spec-004 section 5.4 with fields: `type` (TransitionType), `timestamp` (number), `similarity` (number, present for change/refinement), `previousDescription` (string, truncated), `newDescription` (string, truncated).
 
 ### 6.5 Eviction Types
 
@@ -492,6 +496,8 @@ Full task lifecycle state for inclusion in DiagnosticSnapshot.
 | `reason` | string | yes | no | | Human-readable explanation. |
 
 **Note on group compaction:** For group candidates with `recommendation: "compact"`, the `compaction` field contains an array of CompactionRecommendation objects (one per member). For individual segment candidates, it is a single CompactionRecommendation object. The JSON type is `CompactionRecommendation | CompactionRecommendation[] | null`. Consumers should check the `type` field to determine the shape.
+
+**JSON Schema pattern for compaction polymorphism:** For JSON Schema, use a conditional: `if` the `type` field equals `"group"`, `then` `compaction` is `array of CompactionRecommendation | null`; otherwise `CompactionRecommendation | null`.
 
 #### CandidateScores
 
@@ -662,6 +668,11 @@ Full task lifecycle state for inclusion in DiagnosticSnapshot.
 | `embeddingProviderChanged` | `{ previousMode: string, newMode: string, segmentsReembedded: integer }` |
 | `capacityChanged` | `{ previousCapacity: integer, newCapacity: integer, newUtilization: number }` |
 | `budgetViolation` | `{ operation: string, selfTime: number, budgetTarget: number, segmentCount: integer }` |
+| `customPatternRegistered` | `{ name: string, thresholds: object }` |
+| `stateSnapshotted` | `{ snapshotId: string, segmentCount: integer, totalTokens: integer }` |
+| `stateRestored` | `{ snapshotId: string, segmentCount: integer, totalTokens: integer }` |
+| `lateSeeding` | `{ segmentId: string, tokenCount: integer, reportsSinceBaseline: integer }` |
+| `pinnedCeilingWarning` | `{ pinnedTokens: integer, capacity: integer, pinnedRatio: number }` |
 
 #### PerformanceSummary
 
@@ -804,21 +815,23 @@ Values: `"auto"`, `"default"`, `"saturation"`, `"erosion"`, `"gap"`, `"collapse"
 
 Session timeline event classifications (cl-spec-010 section 5.2).
 
-Values: `"segmentAdded"`, `"segmentUpdated"`, `"segmentReplaced"`, `"segmentCompacted"`, `"segmentSplit"`, `"segmentEvicted"`, `"segmentRestored"`, `"groupCreated"`, `"groupDissolved"`, `"taskSet"`, `"taskCleared"`, `"baselineCaptured"`, `"reportGenerated"`, `"patternActivated"`, `"patternEscalated"`, `"patternDeescalated"`, `"patternResolved"`, `"tokenizerChanged"`, `"embeddingProviderChanged"`, `"capacityChanged"`, `"budgetViolation"`
+Values: `"segmentAdded"`, `"segmentUpdated"`, `"segmentReplaced"`, `"segmentCompacted"`, `"segmentSplit"`, `"segmentEvicted"`, `"segmentRestored"`, `"groupCreated"`, `"groupDissolved"`, `"taskSet"`, `"taskCleared"`, `"baselineCaptured"`, `"reportGenerated"`, `"patternActivated"`, `"patternEscalated"`, `"patternDeescalated"`, `"patternResolved"`, `"tokenizerChanged"`, `"embeddingProviderChanged"`, `"capacityChanged"`, `"budgetViolation"`, `"customPatternRegistered"`, `"stateSnapshotted"`, `"stateRestored"`, `"lateSeeding"`, `"pinnedCeilingWarning"`
 
-21 values. Each has a defined detail structure (section 6.6, TimelineEntry).
+26 values. Each has a defined detail structure (section 6.6, TimelineEntry).
 
 ### 7.7 TaskLifecycleState
 
 Task identity lifecycle states (cl-spec-004 section 4.4).
 
-Values: `"UNSET"`, `"ACTIVE"`
+Values: `"unset"`, `"active"`
 
 ### 7.8 TransitionType
 
-Task transition classifications (cl-spec-004 section 3).
+Task transition classifications (cl-spec-007 section 5.1).
 
-Values: `"new"`, `"refinement"`, `"change"`, `"same"`
+Values: `"new"`, `"refinement"`, `"change"`, `"same"`, `"clear"`
+
+**Note:** `clear` represents clearTask transitions. `same` is returned by setTask when the new descriptor is identical to the current one (no-op).
 
 ### 7.9 CompoundName
 
@@ -854,6 +867,8 @@ This matches the internal type used throughout specs 1–10. Timestamps are not 
 
 **NaN and Infinity:** Not valid in JSON. Fields that could mathematically produce NaN (e.g., `hitRate` when hits + misses = 0) are defined as nullable and emit `null` instead of NaN. No field in the schema produces Infinity.
 
+**Numeric type convention.** This schema uses JSON Schema's `integer` type for fields that are semantically whole numbers (token counts, segment counts, sequence numbers) and `number` for fields that may have fractional values (scores, ratios, timestamps as epoch milliseconds). Behavioral specs (cl-spec-001 through cl-spec-010) use `number` generically, as the implementation language (JavaScript/TypeScript) does not distinguish integer and float types. The `integer` annotations in this schema are constraints, not type changes.
+
 ### 8.3 Null Handling
 
 JSON `null` is used for three semantic cases:
@@ -866,7 +881,7 @@ Every nullable field is explicitly marked in the type definitions (sections 3–
 
 ### 8.4 Enums
 
-All enum values are serialized as **lowercase strings** (or camelCase where defined, e.g., `"fullOfJunk"`, `"UNSET"`). The exact casing matches the values listed in section 7. Consumers should compare enum values case-sensitively.
+All enum values are serialized as **lowercase strings** (or camelCase where defined, e.g., `"fullOfJunk"`, `"fullOfWrongThings"`). The exact casing matches the values listed in section 7. Consumers should compare enum values case-sensitively.
 
 ### 8.5 Arrays
 
