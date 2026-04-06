@@ -33,7 +33,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | 2.5 | Density scorer: redundancy detection (with sampling), information ratio, origin-aware annotation | `scoring/density.ts` | done |
 | 2.6 | Relevance scorer: task similarity, keyword boost, metadata signals, recency, protection clamp/floor | `scoring/relevance.ts` | done |
 | 2.7 | Continuity tracker: eviction/compaction cost, restoration fidelity, ledger, net loss | `scoring/continuity.ts` | done |
-| 2.8 | Baseline and composite: capture trigger, snapshot, normalization, weighted geometric mean | `scoring/baseline.ts`, `scoring/composite.ts` | |
+| 2.8 | Baseline and composite: capture trigger, snapshot, normalization, weighted geometric mean | `scoring/baseline.ts`, `scoring/composite.ts` | done |
 | 2.9 | Quality report: assembly, caching, lazy invalidation, trend computation | `quality-report.ts` | |
 | 2.10 | Phase 2 tests: unit tests for all modules + scoring invariant property tests | `test/unit/*`, `test/property/*` | |
 
@@ -82,7 +82,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | Phase | Tasks | Done | Current |
 |:-----:|:-----:|:----:|:-------:|
 | 1 | 8 | 8 | — |
-| 2 | 10 | 7 | 2.8 |
+| 2 | 10 | 8 | 2.9 |
 | 3 | 5 | 0 | — |
 | 4 | 5 | 0 | — |
 | 5 | 5 | 0 | — |
