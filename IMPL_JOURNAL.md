@@ -44,7 +44,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | # | Task | Module(s) | Status |
 |:-:|------|-----------|:------:|
 | 3.1 | Detection framework: threshold evaluation, hysteresis state machine, 5 base patterns, suppression | `detection.ts` | done |
-| 3.2 | Compound patterns + custom registration: 6 compounds, PatternDefinition contract, fail-open, pattern history | `detection.ts` (continued) | |
+| 3.2 | Compound patterns + custom registration: 6 compounds, PatternDefinition contract, fail-open, pattern history | `detection.ts` (continued) | done |
 | 3.3 | Eviction advisory: 5-signal ranking, protection tiers, strategies, auto-selection, group handling, bridge score, compaction, plan assembly | `eviction.ts` | |
 | 3.4 | Performance instrumentation: per-operation timing, 3-way decomposition, budget violation detection, sampling config | `performance.ts` | |
 | 3.5 | Phase 3 tests: unit tests + detection/eviction property tests | `test/unit/*`, `test/property/*` | |
@@ -83,7 +83,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 |:-----:|:-----:|:----:|:-------:|
 | 1 | 8 | 8 | — |
 | 2 | 10 | 10 | — |
-| 3 | 5 | 1 | 3.2 |
+| 3 | 5 | 2 | 3.3 |
 | 4 | 5 | 0 | — |
 | 5 | 5 | 0 | — |
 
@@ -94,3 +94,4 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | Date | Tasks completed | Notes |
 |------|-----------------|-------|
 | 2026-04-06 | 1.1–1.8, 2.1–2.10 | Phase 1+2 complete: foundation + scoring engine (508 tests) |
+| 2026-04-07 | 3.1–3.2 | Detection framework: base patterns, hysteresis, compounds, custom registration, fail-open, history |

@@ -12,6 +12,11 @@ import type {
   RemediationHint,
   CompoundContext,
   PatternDefinition,
+  PatternHistoryEntry,
+  PatternTrackingState,
+  PatternTrackingSnapshot,
+  PatternStats,
+  CustomPatternMeta,
   Severity,
   PatternName,
   CompoundName,
@@ -33,6 +38,8 @@ const SCORE_HISTORY_CAPACITY = 20;
 const RATE_THRESHOLD = -0.15;
 const COLLAPSE_RATE_THRESHOLD = -0.10;
 const ACUTE_COLLAPSE_THRESHOLD = 0.15;
+const VALID_STRATEGY_HINTS: readonly string[] = ['saturation', 'erosion', 'gap', 'collapse'];
+const VALID_SEVERITIES: readonly string[] = ['watch', 'warning', 'critical'];
 
 // ─── Default Thresholds ───────────────────────────────────────────
 
@@ -75,6 +82,8 @@ interface TrackingState {
   scoreHistory: RingBuffer<{ reportId: string; score: number }>;
   resolvedAt: number | null;
   consecutiveNulls: number;
+  activationCount: number;
+  totalActiveTime: number;
 }
 
 function freshTrackingState(): TrackingState {
@@ -89,6 +98,8 @@ function freshTrackingState(): TrackingState {
     scoreHistory: new RingBuffer(SCORE_HISTORY_CAPACITY),
     resolvedAt: null,
     consecutiveNulls: 0,
+    activationCount: 0,
+    totalActiveTime: 0,
   };
 }
 
@@ -335,6 +346,8 @@ function evalCollapse(report: QualityReport, th: ScoreThresholds, prev: Severity
 interface CompoundDef {
   name: CompoundName;
   requires: string[];
+  /** When true, at least one active base pattern beyond the requires set must also be active. */
+  requiresAnyOther?: boolean;
   diagnosis: string;
   remediationShift: string;
 }
@@ -343,27 +356,40 @@ const COMPOUND_DEFS: CompoundDef[] = [
   { name: 'fullOfJunk', requires: ['saturation', 'erosion'], diagnosis: 'Window is full of redundant content', remediationShift: 'Prioritize deduplication over generic eviction' },
   { name: 'fullOfWrongThings', requires: ['saturation', 'gap'], diagnosis: 'Window is full but irrelevant to current task', remediationShift: 'Prioritize relevance-based eviction' },
   { name: 'scatteredAndIrrelevant', requires: ['fracture', 'gap'], diagnosis: 'Content is both disorganized and irrelevant', remediationShift: 'Consider task update or major context restructuring' },
-  { name: 'lossDominates', requires: ['collapse'], diagnosis: 'Information loss from evictions dominates quality', remediationShift: 'Slow eviction rate, consider restoration' },
+  { name: 'lossDominates', requires: ['collapse'], requiresAnyOther: true, diagnosis: 'Information loss from evictions dominates quality', remediationShift: 'Slow eviction rate, consider restoration' },
   { name: 'pressureLoop', requires: ['collapse', 'saturation'], diagnosis: 'Evicting to relieve pressure causes quality collapse', remediationShift: 'Increase capacity or compact rather than evict' },
   { name: 'triplePressure', requires: ['saturation', 'erosion', 'gap'], diagnosis: 'Full, redundant, and irrelevant — severe quality crisis', remediationShift: 'Aggressive deduplication + relevance-focused eviction' },
 ];
 
-function detectCompounds(activeNames: Set<string>): Map<string, CompoundContext> {
+/** Compounds are evaluated against base patterns only (cl-spec-003 §10.8). */
+function detectCompounds(activeBaseNames: Set<string>): Map<string, CompoundContext> {
   const result = new Map<string, CompoundContext>();
 
   for (const def of COMPOUND_DEFS) {
-    if (def.requires.every(r => activeNames.has(r))) {
-      const ctx: CompoundContext = {
-        compound: def.name,
-        coPatterns: def.requires.filter(r => activeNames.has(r)) as PatternName[],
-        diagnosis: def.diagnosis,
-        remediationShift: def.remediationShift,
-      };
-      for (const r of def.requires) {
-        // Each participating pattern gets the compound context
-        // If multiple compounds match, later ones overwrite (triplePressure > individual)
-        result.set(r, ctx);
-      }
+    if (!def.requires.every(r => activeBaseNames.has(r))) continue;
+
+    // requiresAnyOther: at least one active base pattern beyond the requires set
+    if (def.requiresAnyOther) {
+      const hasOther = [...activeBaseNames].some(n => !def.requires.includes(n));
+      if (!hasOther) continue;
+    }
+
+    // For requiresAnyOther (lossDominates), all active base patterns participate
+    const participants = def.requiresAnyOther
+      ? [...activeBaseNames]
+      : [...def.requires];
+
+    const ctx: CompoundContext = {
+      compound: def.name,
+      coPatterns: participants as PatternName[],
+      diagnosis: def.diagnosis,
+      remediationShift: def.remediationShift,
+    };
+
+    for (const p of participants) {
+      // Each participating pattern gets the compound context
+      // If multiple compounds match, later ones overwrite (triplePressure > individual)
+      result.set(p, ctx);
     }
   }
   return result;
@@ -430,6 +456,8 @@ export class DetectionEngine {
   private readonly margin: number;
   private readonly tracking = new Map<string, TrackingState>();
   private readonly customPatterns: PatternDefinition[] = [];
+  private readonly history: PatternHistoryEntry[] = [];
+  private warnings: string[] = [];
 
   constructor(config?: DetectionConfig) {
     this.thresholds = config?.thresholds
@@ -442,25 +470,66 @@ export class DetectionEngine {
       throw new ValidationError('Hysteresis margin must be in [0.01, 0.10]', { margin: this.margin });
     }
 
-    // Register custom patterns from config
+    // Register custom patterns from config (all-or-nothing per cl-spec-003 §10.4)
     if (config?.customPatterns !== undefined) {
+      const seen = new Set<string>();
       for (const def of config.customPatterns) {
-        this.registerPattern(def);
+        this.validatePatternFields(def);
+        if (seen.has(def.name)) {
+          throw new ValidationError(`Pattern name already registered: ${def.name}`, { name: def.name });
+        }
+        seen.add(def.name);
+      }
+      // All valid — register
+      for (const def of config.customPatterns) {
+        this.customPatterns.push(def);
+      }
+    }
+  }
+
+  /** Validate all fields of a PatternDefinition (cl-spec-003 §10.3). */
+  private validatePatternFields(def: PatternDefinition): void {
+    if (!def.name || def.name.length === 0) {
+      throw new ValidationError('Pattern name must be non-empty');
+    }
+    if (!def.description || def.description.length === 0) {
+      throw new ValidationError('Pattern description must be non-empty', { name: def.name });
+    }
+    if ((BASE_PATTERN_NAMES as readonly string[]).includes(def.name)) {
+      throw new ValidationError(`Pattern name collides with base pattern: ${def.name}`, { name: def.name });
+    }
+    if (typeof def.detect !== 'function') {
+      throw new ValidationError('Pattern detect must be a function', { name: def.name });
+    }
+    if (typeof def.severity !== 'function') {
+      throw new ValidationError('Pattern severity must be a function', { name: def.name });
+    }
+    if (typeof def.explanation !== 'function') {
+      throw new ValidationError('Pattern explanation must be a function', { name: def.name });
+    }
+    if (typeof def.remediation !== 'function') {
+      throw new ValidationError('Pattern remediation must be a function', { name: def.name });
+    }
+    if (def.priority !== undefined) {
+      if (!Number.isInteger(def.priority) || def.priority <= 0) {
+        throw new ValidationError('Pattern priority must be a positive integer', { name: def.name, priority: def.priority });
+      }
+    }
+    if (def.strategyHint !== undefined) {
+      if (!VALID_STRATEGY_HINTS.includes(def.strategyHint)) {
+        throw new ValidationError(
+          `Pattern strategyHint must be one of: ${VALID_STRATEGY_HINTS.join(', ')}`,
+          { name: def.name, strategyHint: def.strategyHint },
+        );
       }
     }
   }
 
   registerPattern(def: PatternDefinition): void {
-    if (!def.name || def.name.length === 0) {
-      throw new ValidationError('Pattern name must be non-empty');
-    }
-    if ((BASE_PATTERN_NAMES as readonly string[]).includes(def.name)) {
-      throw new ValidationError(`Pattern name collides with base pattern: ${def.name}`, { name: def.name });
-    }
+    this.validatePatternFields(def);
     if (this.customPatterns.some(p => p.name === def.name)) {
       throw new ValidationError(`Pattern name already registered: ${def.name}`, { name: def.name });
     }
-
     this.customPatterns.push(def);
   }
 
@@ -468,6 +537,8 @@ export class DetectionEngine {
     report: QualityReport,
     taskState: { isActive: boolean; gracePeriodActive: boolean },
   ): DetectionResult {
+    this.warnings = [];
+
     if (report.segmentCount === 0) {
       return { patterns: [], patternCount: 0, highestSeverity: null, preBaseline: report.baseline === null };
     }
@@ -475,6 +546,8 @@ export class DetectionEngine {
     const timestamp = report.timestamp;
     const activePatterns: ActivePattern[] = [];
     const activeNames = new Set<string>();
+    const baseActiveNames = new Set<string>();
+    const cycleHistoryStart = this.history.length;
 
     // ── Evaluate 5 base patterns ────────────────────────────────
 
@@ -491,8 +564,9 @@ export class DetectionEngine {
       state.scoreHistory.push({ reportId: report.reportId, score: ev.primaryScore });
 
       if (ev.severity !== null) {
-        this.activatePattern(state, ev.severity, timestamp);
+        this.activatePattern(name, state, ev.severity, timestamp, report.reportId, ev.primaryScore);
         activeNames.add(name);
+        baseActiveNames.add(name);
 
         const sig: PatternSignature = {
           primaryScore: { dimension: ev.primaryDimension, value: ev.primaryScore },
@@ -514,86 +588,149 @@ export class DetectionEngine {
           compoundContext: null,
         });
       } else {
-        this.deactivatePattern(state, timestamp);
+        this.deactivatePattern(name, state, timestamp, report.reportId, ev.primaryScore);
       }
     }
 
-    // ── Evaluate custom patterns ────────────────────────────────
+    // ── Evaluate custom patterns (cl-spec-003 §10.5) ────────────
 
     for (const def of this.customPatterns) {
       if (this.suppressed.has(def.name)) continue;
 
       const state = this.ensureTracking(def.name);
 
+      // Step 1: Call detect with fail-open (cl-spec-003 invariant 14)
+      let signal: ReturnType<typeof def.detect> = null;
+      let detectThrew = false;
       try {
         const reportCopy = deepCopy(report);
-        const signal = def.detect(reportCopy);
+        signal = def.detect(reportCopy);
+      } catch (err: unknown) {
+        detectThrew = true;
+        const msg = err instanceof Error ? err.message : String(err);
+        this.warnings.push(`Custom pattern '${def.name}' detect() threw: ${msg}`);
+      }
 
-        if (signal !== null) {
-          state.consecutiveNulls = 0;
-          const sev = def.severity(reportCopy, state.severity);
-          this.activatePattern(state, sev, timestamp);
+      // detect() threw — hysteresis state unchanged, keep at current state
+      if (detectThrew) {
+        if (state.active && state.severity !== null) {
           activeNames.add(def.name);
+          activePatterns.push(this.buildMaintainedEntry(def.name, state, timestamp));
+        }
+        continue;
+      }
 
-          const sig: PatternSignature = {
-            primaryScore: signal.primaryScore,
-            secondaryScores: signal.secondaryScores,
-            utilization: signal.utilization,
-            thresholdCrossed: { severity: sev, threshold: 0 },
-          };
+      if (signal !== null) {
+        state.consecutiveNulls = 0;
 
+        // Step 2: Call severity with fail-open + validation
+        let sev: Severity | null = null;
+        try {
+          const reportCopy = deepCopy(report);
+          const raw = def.severity(reportCopy, state.severity);
+          if (!VALID_SEVERITIES.includes(raw)) {
+            this.warnings.push(`Custom pattern '${def.name}' severity() returned invalid value: ${String(raw)}`);
+          } else {
+            sev = raw;
+          }
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.warnings.push(`Custom pattern '${def.name}' severity() threw: ${msg}`);
+        }
+
+        // severity failed — hysteresis unchanged, keep at current state
+        if (sev === null) {
+          if (state.active && state.severity !== null) {
+            activeNames.add(def.name);
+            activePatterns.push(this.buildMaintainedEntry(def.name, state, timestamp));
+          }
+          continue;
+        }
+
+        // Successful detection
+        this.activatePattern(def.name, state, sev, timestamp, report.reportId, signal.primaryScore.value);
+        activeNames.add(def.name);
+
+        const sig: PatternSignature = {
+          primaryScore: signal.primaryScore,
+          secondaryScores: signal.secondaryScores,
+          utilization: signal.utilization,
+          thresholdCrossed: { severity: sev, threshold: 0 },
+        };
+
+        // Step 3: Explanation with fail-open fallback (cl-spec-003 §10.3)
+        const reportCopyForCallbacks = deepCopy(report);
+        let explanation: string;
+        try {
+          explanation = def.explanation(reportCopyForCallbacks);
+        } catch {
+          explanation = `Custom pattern '${def.name}' is active at ${sev}`;
+          this.warnings.push(`Custom pattern '${def.name}' explanation() threw, using fallback`);
+        }
+
+        // Step 4: Remediation with fail-open fallback
+        let remediation: RemediationHint[];
+        try {
+          remediation = def.remediation(reportCopyForCallbacks);
+        } catch {
+          remediation = [];
+          this.warnings.push(`Custom pattern '${def.name}' remediation() threw, using fallback`);
+        }
+
+        activePatterns.push({
+          name: def.name,
+          severity: sev,
+          activatedAt: state.activatedAt!,
+          currentSince: state.severitySince!,
+          duration: timestamp - state.activatedAt!,
+          trending: computeTrending(state.scoreHistory),
+          signature: sig,
+          explanation,
+          remediation,
+          compoundContext: null,
+        });
+
+        state.scoreHistory.push({ reportId: report.reportId, score: signal.primaryScore.value });
+      } else {
+        // detect returned null — 2-cycle deactivation (cl-spec-003 §10.6)
+        state.consecutiveNulls++;
+        if (state.consecutiveNulls >= 2) {
+          this.deactivatePattern(def.name, state, timestamp, report.reportId, 0);
+        } else if (state.active && state.severity !== null) {
+          // Maintain for 1 more cycle
+          activeNames.add(def.name);
           activePatterns.push({
             name: def.name,
-            severity: sev,
+            severity: state.severity,
             activatedAt: state.activatedAt!,
             currentSince: state.severitySince!,
             duration: timestamp - state.activatedAt!,
             trending: computeTrending(state.scoreHistory),
-            signature: sig,
-            explanation: def.explanation(reportCopy),
-            remediation: def.remediation(reportCopy),
+            signature: { primaryScore: { dimension: 'custom', value: 0 }, secondaryScores: [], utilization: null, thresholdCrossed: { severity: state.severity, threshold: 0 } },
+            explanation: `Pattern ${def.name} deactivating (1 cycle remaining)`,
+            remediation: [],
             compoundContext: null,
           });
-
-          state.scoreHistory.push({ reportId: report.reportId, score: signal.primaryScore.value });
-        } else {
-          state.consecutiveNulls++;
-          // 2-cycle deactivation for custom patterns
-          if (state.consecutiveNulls >= 2) {
-            this.deactivatePattern(state, timestamp);
-          } else if (state.active && state.severity !== null) {
-            // Maintain for 1 more cycle
-            activeNames.add(def.name);
-            activePatterns.push({
-              name: def.name,
-              severity: state.severity,
-              activatedAt: state.activatedAt!,
-              currentSince: state.severitySince!,
-              duration: timestamp - state.activatedAt!,
-              trending: computeTrending(state.scoreHistory),
-              signature: { primaryScore: { dimension: 'custom', value: 0 }, secondaryScores: [], utilization: null, thresholdCrossed: { severity: state.severity, threshold: 0 } },
-              explanation: `Pattern ${def.name} deactivating (1 cycle remaining)`,
-              remediation: [],
-              compoundContext: null,
-            });
-          }
-        }
-      } catch {
-        // Fail-open: catch and swallow, treat as null signal
-        state.consecutiveNulls++;
-        if (state.consecutiveNulls >= 2) {
-          this.deactivatePattern(state, timestamp);
         }
       }
     }
 
-    // ── Compound detection ──────────────────────────────────────
+    // ── Compound detection (base patterns only, cl-spec-003 §10.8) ──
 
-    const compounds = detectCompounds(activeNames);
+    const compounds = detectCompounds(baseActiveNames);
     for (const ap of activePatterns) {
       const ctx = compounds.get(ap.name as string);
       if (ctx !== undefined) {
         ap.compoundContext = ctx;
+      }
+    }
+
+    // Tag history entries from this cycle with compound context
+    for (let i = cycleHistoryStart; i < this.history.length; i++) {
+      const entry = this.history[i]!;
+      const ctx = compounds.get(entry.name as string);
+      if (ctx !== undefined) {
+        entry.compoundContext = ctx.compound;
       }
     }
 
@@ -638,13 +775,53 @@ export class DetectionEngine {
     return this.tracking.get(name)?.severity ?? null;
   }
 
-  private activatePattern(state: TrackingState, severity: Severity, timestamp: number): void {
-    if (!state.active) {
+  /** Build an ActivePattern entry for a custom pattern held at its current state (detect/severity failed). */
+  private buildMaintainedEntry(name: string, state: TrackingState, timestamp: number): ActivePattern {
+    return {
+      name,
+      severity: state.severity!,
+      activatedAt: state.activatedAt!,
+      currentSince: state.severitySince!,
+      duration: timestamp - state.activatedAt!,
+      trending: computeTrending(state.scoreHistory),
+      signature: {
+        primaryScore: { dimension: 'custom', value: 0 },
+        secondaryScores: [],
+        utilization: null,
+        thresholdCrossed: { severity: state.severity!, threshold: 0 },
+      },
+      explanation: `Custom pattern '${name}' is active at ${state.severity}`,
+      remediation: [],
+      compoundContext: null,
+    };
+  }
+
+  private activatePattern(
+    name: string, state: TrackingState, severity: Severity,
+    timestamp: number, reportId: string, score: number,
+  ): void {
+    const wasActive = state.active;
+    const prevSeverity = state.severity;
+
+    if (!wasActive) {
       state.active = true;
       state.activatedAt = timestamp;
       state.resolvedAt = null;
       state.reportCount = 0;
+      state.activationCount++;
+      this.history.push({
+        name: name as PatternName, event: 'activated', severity,
+        timestamp, reportId, score, compoundContext: null,
+      });
+    } else if (prevSeverity !== null && severity !== prevSeverity) {
+      const event: PatternHistoryEntry['event'] =
+        severityRank(severity) > severityRank(prevSeverity) ? 'escalated' : 'deescalated';
+      this.history.push({
+        name: name as PatternName, event, severity,
+        timestamp, reportId, score, compoundContext: null,
+      });
     }
+
     if (state.severity !== severity) {
       state.severitySince = timestamp;
     }
@@ -657,10 +834,21 @@ export class DetectionEngine {
     state.consecutiveNulls = 0;
   }
 
-  private deactivatePattern(state: TrackingState, timestamp: number): void {
+  private deactivatePattern(
+    name: string, state: TrackingState, timestamp: number,
+    reportId: string, score: number,
+  ): void {
     if (state.active) {
+      const prevSeverity = state.severity ?? 'watch';
+      this.history.push({
+        name: name as PatternName, event: 'resolved', severity: prevSeverity,
+        timestamp, reportId, score, compoundContext: null,
+      });
       state.active = false;
       state.resolvedAt = timestamp;
+      if (state.activatedAt !== null) {
+        state.totalActiveTime += timestamp - state.activatedAt;
+      }
     }
     state.severity = null;
   }
@@ -669,6 +857,61 @@ export class DetectionEngine {
     if (name in BASE_PRIORITIES) return BASE_PRIORITIES[name]!;
     const custom = this.customPatterns.find(p => p.name === name);
     return custom?.priority ?? 1000;
+  }
+
+  // ── Diagnostic Accessors ────────────────────────────────────────
+
+  getPatternHistory(): PatternHistoryEntry[] {
+    return [...this.history];
+  }
+
+  getWarnings(): string[] {
+    return [...this.warnings];
+  }
+
+  getTrackingSnapshot(): PatternTrackingSnapshot {
+    const perPattern: Record<string, PatternTrackingState> = {};
+    const perPatternStats: Record<string, PatternStats> = {};
+
+    for (const [name, state] of this.tracking) {
+      perPattern[name] = {
+        name,
+        state: state.active ? 'active' : 'resolved',
+        activatedAt: state.activatedAt,
+        currentSeverity: state.severity,
+        severitySince: state.severitySince,
+        peakSeverity: state.peakSeverity,
+        peakAt: state.peakAt,
+        reportCount: state.reportCount,
+        scoreHistory: state.scoreHistory.toArray(),
+        consecutiveNulls: state.consecutiveNulls,
+        resolvedAt: state.resolvedAt,
+      };
+
+      perPatternStats[name] = {
+        activationCount: state.activationCount,
+        totalActiveTime: state.totalActiveTime,
+        peakSeverity: state.peakSeverity ?? 'watch',
+        currentState: state.active ? 'active' : 'inactive',
+        currentSeverity: state.severity,
+        lastActivation: state.activatedAt,
+        lastResolution: state.resolvedAt,
+        recurrenceCount: Math.max(0, state.activationCount - 1),
+      };
+    }
+
+    return { perPattern, history: [...this.history], perPatternStats };
+  }
+
+  getCustomPatternMeta(): CustomPatternMeta[] {
+    return this.customPatterns.map((def, i) => ({
+      name: def.name,
+      description: def.description,
+      priority: def.priority ?? 1000,
+      strategyHint: def.strategyHint ?? null,
+      registeredAt: 0,
+      registrationOrder: i,
+    }));
   }
 }
 
