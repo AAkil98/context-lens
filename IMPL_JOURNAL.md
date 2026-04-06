@@ -30,7 +30,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | 2.2 | Embedding subsystem: provider interface, embedding cache, provider switching, fallback | `embedding.ts` | done |
 | 2.3 | Task identity: descriptor model, validation, normalization, transitions, grace period, staleness, history | `task.ts` | done |
 | 2.4 | Coherence scorer: adjacency similarity, topical concentration (with sampling), group integrity | `scoring/coherence.ts` | done |
-| 2.5 | Density scorer: redundancy detection (with sampling), information ratio, origin-aware annotation | `scoring/density.ts` | |
+| 2.5 | Density scorer: redundancy detection (with sampling), information ratio, origin-aware annotation | `scoring/density.ts` | done |
 | 2.6 | Relevance scorer: task similarity, keyword boost, metadata signals, recency, protection clamp/floor | `scoring/relevance.ts` | |
 | 2.7 | Continuity tracker: eviction/compaction cost, restoration fidelity, ledger, net loss | `scoring/continuity.ts` | |
 | 2.8 | Baseline and composite: capture trigger, snapshot, normalization, weighted geometric mean | `scoring/baseline.ts`, `scoring/composite.ts` | |
@@ -82,7 +82,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | Phase | Tasks | Done | Current |
 |:-----:|:-----:|:----:|:-------:|
 | 1 | 8 | 8 | — |
-| 2 | 10 | 4 | 2.5 |
+| 2 | 10 | 5 | 2.6 |
 | 3 | 5 | 0 | — |
 | 4 | 5 | 0 | — |
 | 5 | 5 | 0 | — |
