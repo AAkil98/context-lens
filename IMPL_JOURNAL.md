@@ -11,7 +11,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 
 | # | Task | Module(s) | Status |
 |:-:|------|-----------|:------:|
-| 1.1 | Project scaffolding: package.json, tsconfig.json, tsup.config.ts, vitest.config.ts, directory structure, .gitignore | — | |
+| 1.1 | Project scaffolding: package.json, tsconfig.json, tsup.config.ts, vitest.config.ts, directory structure, .gitignore | — | done |
 | 1.2 | Shared types: all 36 reconciled types organized by domain | `types.ts` | |
 | 1.3 | Error hierarchy: ContextLensError base + 12 subclasses | `errors.ts` | |
 | 1.4 | Utilities: FNV-1a hash, LRU cache, ring buffer, deep copy | `utils/*` | |
@@ -81,7 +81,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 
 | Phase | Tasks | Done | Current |
 |:-----:|:-----:|:----:|:-------:|
-| 1 | 8 | 0 | — |
+| 1 | 8 | 1 | 1.2 |
 | 2 | 10 | 0 | — |
 | 3 | 5 | 0 | — |
 | 4 | 5 | 0 | — |
@@ -93,4 +93,4 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 
 | Date | Tasks completed | Notes |
 |------|-----------------|-------|
-| | | |
+| 2026-04-06 | 1.1 | Project scaffolding complete |
