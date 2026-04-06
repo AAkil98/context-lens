@@ -49,7 +49,7 @@ export interface ContextLensEventMap {
 
 type Handler<T> = (payload: T) => void;
 
-export class EventEmitter<TMap extends Record<string, unknown>> {
+export class EventEmitter<TMap> {
   private readonly handlers = new Map<keyof TMap, Set<Handler<never>>>();
   private emitting = false;
 

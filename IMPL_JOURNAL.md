@@ -17,7 +17,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | 1.4 | Utilities: FNV-1a hash, LRU cache, ring buffer, deep copy | `utils/*` | done |
 | 1.5 | Event emitter: type-safe, synchronous, re-entrancy guard, error swallowing | `events.ts` | done |
 | 1.6 | Tokenizer: provider interface, approximate provider, token cache, capacity report | `tokenizer.ts` | done |
-| 1.7 | Segment store: segment CRUD, groups, protection, lifecycle, position tracking, dedup | `segment-store.ts` | |
+| 1.7 | Segment store: segment CRUD, groups, protection, lifecycle, position tracking, dedup | `segment-store.ts` | done |
 | 1.8 | Phase 1 tests: unit tests for all modules + property-based tests | `test/unit/*`, `test/property/*` | |
 
 ---
@@ -81,7 +81,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 
 | Phase | Tasks | Done | Current |
 |:-----:|:-----:|:----:|:-------:|
-| 1 | 8 | 6 | 1.7 |
+| 1 | 8 | 7 | 1.8 |
 | 2 | 10 | 0 | — |
 | 3 | 5 | 0 | — |
 | 4 | 5 | 0 | — |
@@ -93,4 +93,4 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 
 | Date | Tasks completed | Notes |
 |------|-----------------|-------|
-| 2026-04-06 | 1.1–1.6 | Scaffolding, types, errors, utils, events, tokenizer |
+| 2026-04-06 | 1.1–1.7 | Scaffolding through segment store |
