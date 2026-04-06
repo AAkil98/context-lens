@@ -15,7 +15,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | 1.2 | Shared types: all 36 reconciled types organized by domain | `types.ts` | done |
 | 1.3 | Error hierarchy: ContextLensError base + 12 subclasses | `errors.ts` | done |
 | 1.4 | Utilities: FNV-1a hash, LRU cache, ring buffer, deep copy | `utils/*` | done |
-| 1.5 | Event emitter: type-safe, synchronous, re-entrancy guard, error swallowing | `events.ts` | |
+| 1.5 | Event emitter: type-safe, synchronous, re-entrancy guard, error swallowing | `events.ts` | done |
 | 1.6 | Tokenizer: provider interface, approximate provider, token cache, capacity report | `tokenizer.ts` | |
 | 1.7 | Segment store: segment CRUD, groups, protection, lifecycle, position tracking, dedup | `segment-store.ts` | |
 | 1.8 | Phase 1 tests: unit tests for all modules + property-based tests | `test/unit/*`, `test/property/*` | |
@@ -81,7 +81,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 
 | Phase | Tasks | Done | Current |
 |:-----:|:-----:|:----:|:-------:|
-| 1 | 8 | 4 | 1.5 |
+| 1 | 8 | 5 | 1.6 |
 | 2 | 10 | 0 | — |
 | 3 | 5 | 0 | — |
 | 4 | 5 | 0 | — |
@@ -93,4 +93,4 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 
 | Date | Tasks completed | Notes |
 |------|-----------------|-------|
-| 2026-04-06 | 1.1–1.4 | Scaffolding, types, errors, utilities |
+| 2026-04-06 | 1.1–1.5 | Scaffolding, types, errors, utilities, events |
