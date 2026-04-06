@@ -13,7 +13,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 |:-:|------|-----------|:------:|
 | 1.1 | Project scaffolding: package.json, tsconfig.json, tsup.config.ts, vitest.config.ts, directory structure, .gitignore | — | done |
 | 1.2 | Shared types: all 36 reconciled types organized by domain | `types.ts` | done |
-| 1.3 | Error hierarchy: ContextLensError base + 12 subclasses | `errors.ts` | |
+| 1.3 | Error hierarchy: ContextLensError base + 12 subclasses | `errors.ts` | done |
 | 1.4 | Utilities: FNV-1a hash, LRU cache, ring buffer, deep copy | `utils/*` | |
 | 1.5 | Event emitter: type-safe, synchronous, re-entrancy guard, error swallowing | `events.ts` | |
 | 1.6 | Tokenizer: provider interface, approximate provider, token cache, capacity report | `tokenizer.ts` | |
@@ -81,7 +81,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 
 | Phase | Tasks | Done | Current |
 |:-----:|:-----:|:----:|:-------:|
-| 1 | 8 | 2 | 1.3 |
+| 1 | 8 | 3 | 1.4 |
 | 2 | 10 | 0 | — |
 | 3 | 5 | 0 | — |
 | 4 | 5 | 0 | — |
@@ -93,4 +93,4 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 
 | Date | Tasks completed | Notes |
 |------|-----------------|-------|
-| 2026-04-06 | 1.1, 1.2 | Project scaffolding; shared types (all domains) |
+| 2026-04-06 | 1.1–1.3 | Scaffolding, shared types, error hierarchy |
