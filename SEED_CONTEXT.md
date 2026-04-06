@@ -208,7 +208,7 @@ Key decisions made in Spec 13:
 
 ## What's next
 
-**Design spec review is COMPLETE. All 14 specs reviewed, reconciled, and amended. Ready for implementation specs.**
+**Design spec review COMPLETE. Implementation specs COMPLETE. Ready for coding specs and code.**
 
 ### Review progress
 
@@ -246,12 +246,29 @@ Four sweeps executed across 14 specs. 26 findings (R-165 through R-190). Key res
 
 **Findings and details:** `REVIEW_FINDINGS.md` — all findings across Phases 1–3 with resolutions, amendment log, type reconciliation table, and sign-off.
 
+### Implementation specs
+
+**Implementation specs: COMPLETE (2026-04-06)**
+
+5 documents, 2,161 lines total, covering 5 build phases and ~30 modules:
+
+- `IMPLEMENTATION.md` — strategy document (tech stack: TypeScript/tsup/vitest, single package with sub-path exports, zero runtime deps for core) + Phase 1 inline (foundation: types, errors, events, utils, segment-store, tokenizer)
+- `impl/I-02-scoring-engine.md` — Phase 2: similarity engine, embedding subsystem, task identity, 4 dimension scorers, baseline, composite, quality report assembly (10 modules, most complex phase)
+- `impl/I-03-detection-advisory.md` — Phase 3: detection framework (5 base patterns, 6 compounds, custom registration), eviction advisory (5-signal ranking, 4 strategies), performance instrumentation (3 modules)
+- `impl/I-04-api-integration.md` — Phase 4: ContextLens class (integration layer), diagnostics, formatters (3 modules)
+- `impl/I-05-enrichments.md` — Phase 5: JSON Schema, serialization, fleet monitor, OTel export (4 modules, all optional)
+
+Key technology decisions: TypeScript strict mode, tsup for ESM+CJS dual build, vitest + fast-check for testing (unit, integration, property-based, benchmarks), `@opentelemetry/api` as sole peer dep (OTel entry point only).
+
 ## Files to read on pickup
 
-1. `REVIEW.md` — review guide with execution plan, spec inventory, dependency graph, architectural decisions, session log
-2. `REVIEW_FINDINGS.md` — all findings (Phases 1–3) with resolutions, amendment log, type reconciliation table, sign-off
-3. `specs/01-segment-model.md` — completed Spec 1 (the foundation)
-3. `specs/06-tokenization-strategy.md` — completed Spec 6 (token counting, provider abstraction, caching)
+1. `IMPL_JOURNAL.md` — ephemeral build tracker, 33 tasks across 5 phases, current progress
+2. `IMPLEMENTATION.md` — implementation strategy, tech stack, package structure, dependency graph, phase breakdown, Phase 1 inline
+3. `impl/I-02-scoring-engine.md` through `impl/I-05-enrichments.md` — per-phase implementation specs
+**Archived:** `REVIEW.md` and `REVIEW_FINDINGS.md` exported to `../archive/context-lens-REVIEW.md` and `../archive/context-lens-REVIEW_FINDINGS.md`
+
+4. `specs/01-segment-model.md` — completed Spec 1 (the foundation)
+5. `specs/06-tokenization-strategy.md` — completed Spec 6 (token counting, provider abstraction, caching)
 4. `specs/02-quality-model.md` — completed Spec 2 (four quality dimensions, scoring mechanics, baseline, reports)
 5. `specs/03-degradation-patterns.md` — completed Spec 3, amended (five degradation patterns, detection framework, pattern interactions, custom pattern registration §10)
 6. `specs/04-task-identity.md` — completed Spec 4 (task descriptor model, lifecycle, transitions, preparation, integration, invariants)
