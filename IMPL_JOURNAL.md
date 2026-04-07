@@ -67,7 +67,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 
 | # | Task | Module(s) | Status |
 |:-:|------|-----------|:------:|
-| 5.1 | Report schema: JSON Schema files (draft 2020-12), toJSON(), validate(), static schemas export | `schemas/*`, schema utilities | |
+| 5.1 | Report schema: JSON Schema files (draft 2020-12), toJSON(), validate(), static schemas export | `schemas/*`, schema utilities | done |
 | 5.2 | Serialization: snapshot(), fromSnapshot(), format versioning, provider change detection | `serialization.ts` | |
 | 5.3 | Fleet monitor: ContextLensFleet class, assessFleet, aggregation, fleet events | `fleet.ts` | |
 | 5.4 | OTel export: ContextLensExporter, gauges, counters, histogram, log events | `otel.ts` | |
@@ -85,7 +85,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | 2 | 10 | 10 | — |
 | 3 | 5 | 5 | — |
 | 4 | 5 | 5 | — |
-| 5 | 5 | 0 | — |
+| 5 | 5 | 1 | — |
 
 ---
 

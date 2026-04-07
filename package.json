@@ -23,6 +23,7 @@
       "require": "./dist/fleet.cjs"
     },
     "./schemas": {
+      "types": "./dist/schemas/index.d.ts",
       "import": "./dist/schemas/index.mjs",
       "require": "./dist/schemas/index.cjs"
     }

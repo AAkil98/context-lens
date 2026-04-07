@@ -5,6 +5,7 @@ export default defineConfig({
     index: 'src/index.ts',
     otel: 'src/otel.ts',
     fleet: 'src/fleet.ts',
+    'schemas/index': 'src/schemas/index.ts',
   },
   format: ['esm', 'cjs'],
   dts: true,

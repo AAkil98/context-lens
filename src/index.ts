@@ -749,3 +749,8 @@ export class ContextLens {
     return segments.map(s => ({ hash: fnv1a(s.content), content: s.content }));
   }
 }
+
+// ─── Schema re-exports ───────────────────────────────────────────
+
+export { schemas, toJSON, validate, SCHEMA_VERSION } from './schemas/index.js';
+export type { ValidationResult, ValidationError } from './schemas/index.js';
