@@ -8,12 +8,18 @@ import type {
   Group,
   ProtectionLevel,
   TokenizerProvider,
+  TokenizerMetadata,
   EmbeddingProvider,
   EmbeddingProviderMetadata,
   CapacityReport,
   QualityReport,
   EvictionRecord,
+  EvictionPlan,
   PatternDefinition,
+  TaskDescriptor,
+  TaskTransition,
+  TaskState,
+  BaselineSnapshot,
 } from './types.js';
 import {
   ConfigurationError,
@@ -27,7 +33,7 @@ import { SimilarityEngine } from './similarity.js';
 import { TaskManager } from './task.js';
 import { QualityReportAssembler, type ScoringSegment, type AssessmentContext } from './quality-report.js';
 import { DetectionEngine, type DetectionConfig } from './detection.js';
-import { EvictionAdvisory } from './eviction.js';
+import { EvictionAdvisory, type PlanOptions } from './eviction.js';
 import { PerformanceInstrumentation } from './performance.js';
 import { ContinuityTracker } from './scoring/continuity.js';
 import { BaselineManager } from './scoring/baseline.js';
@@ -449,19 +455,226 @@ export class ContextLens {
     return this.emitter.on(event, handler);
   }
 
-  // ── Internal Accessors (expanded in Task 4.2) ───────────────────
+  // ── Assessment ──────────────────────────────────────────────────
 
-  /** @internal Expose internals for Task 4.2 wiring — will be replaced with public methods. */
-  _getInternals() {
-    return {
-      detection: this.detection,
-      evictionAdvisory: this.evictionAdvisory,
-      perf: this.perf,
-      constructionTimestamp: this.constructionTimestamp,
-      configSnapshot: this.configSnapshot,
-      qualityCacheValid: this.qualityCacheValid,
-      cachedReport: this.cachedReport,
-    };
+  /** Assess context window quality. Returns cached report if no mutations since last call. */
+  assess(): QualityReport {
+    // Step 1: Check cache
+    if (this.qualityCacheValid && this.cachedReport !== null) {
+      return deepCopy(this.cachedReport);
+    }
+
+    // Step 2: Build AssessmentContext
+    const ctx = this.buildAssessmentContext();
+
+    // Step 3: Delegate to quality-report module
+    const report = this.reportAssembler.assess(ctx);
+
+    // Step 4: Run detection
+    const historyLenBefore = this.detection.getPatternHistory().length;
+    const taskSummary = this.taskManager.getSummary();
+    const detectionResult = this.detection.detect(report, {
+      isActive: this.taskManager.isActive(),
+      gracePeriodActive: taskSummary.gracePeriodActive,
+    });
+    report.patterns = detectionResult;
+
+    // Step 5: Fire pattern events for transitions in this cycle
+    const fullHistory = this.detection.getPatternHistory();
+    for (let i = historyLenBefore; i < fullHistory.length; i++) {
+      const entry = fullHistory[i]!;
+      if (entry.event === 'activated' || entry.event === 'escalated') {
+        const ap = detectionResult.patterns.find(p => p.name === entry.name);
+        if (ap) {
+          this.emitter.emit('patternActivated', { pattern: deepCopy(ap) });
+        }
+      } else if (entry.event === 'resolved') {
+        const snapshot = this.detection.getTrackingSnapshot();
+        const stats = snapshot.perPatternStats[entry.name];
+        this.emitter.emit('patternResolved', {
+          name: entry.name,
+          duration: stats?.totalActiveTime ?? 0,
+          peakSeverity: stats?.peakSeverity ?? entry.severity,
+        });
+      }
+    }
+
+    // Step 6: Cache
+    this.cachedReport = report;
+    this.qualityCacheValid = true;
+
+    // Step 7: Tick task grace period / staleness
+    this.taskManager.tickReport();
+
+    // Step 8: Fire reportGenerated
+    this.emitter.emit('reportGenerated', { report: deepCopy(report) });
+
+    return deepCopy(report);
+  }
+
+  // ── Eviction Planning ───────────────────────────────────────────
+
+  /** Generate an advisory eviction plan. */
+  planEviction(options?: PlanOptions): EvictionPlan {
+    // Ensure a report exists
+    if (this.cachedReport === null) {
+      this.assess();
+    }
+
+    const plan = this.evictionAdvisory.planEviction(
+      this.cachedReport!,
+      options,
+      this.detection.getCustomPatternMeta(),
+    );
+
+    return deepCopy(plan);
+  }
+
+  // ── Task Operations ─────────────────────────────────────────────
+
+  /** Set or update the task descriptor. */
+  async setTask(descriptor: TaskDescriptor): Promise<TaskTransition> {
+    const desc = deepCopy(descriptor);
+    const transition = await this.taskManager.setTask(desc, this.similarity, this.embedding);
+
+    // "same" transitions don't invalidate or fire events
+    if (transition.type === 'same') {
+      return deepCopy(transition);
+    }
+
+    this.qualityCacheValid = false;
+    this.reportAssembler.invalidate();
+    this.emitter.emit('taskChanged', { transition: deepCopy(transition) });
+    return deepCopy(transition);
+  }
+
+  /** Clear the current task. */
+  clearTask(): void {
+    if (!this.taskManager.isActive()) return;
+
+    this.taskManager.clearTask();
+    this.qualityCacheValid = false;
+    this.reportAssembler.invalidate();
+    this.emitter.emit('taskCleared', {});
+  }
+
+  /** Get the current task descriptor, or null. */
+  getTask(): TaskDescriptor | null {
+    const task = this.taskManager.getCurrentTask();
+    return task !== null ? deepCopy(task) : null;
+  }
+
+  /** Get full task lifecycle state. */
+  getTaskState(): TaskState {
+    return deepCopy(this.taskManager.getState());
+  }
+
+  // ── Provider Management ─────────────────────────────────────────
+
+  /** Change the tokenizer provider. Recounts all segments. */
+  setTokenizer(provider: TokenizerProvider | 'approximate', metadata?: TokenizerMetadata): void {
+    const result = this.tokenizer.switchProvider(provider, metadata, {
+      getActiveSegments: () => this.store.getActiveSegmentIterator(),
+      setSegmentTokenCount: (id: string, tokenCount: number) => {
+        this.store.setSegmentTokenCount(id, tokenCount);
+      },
+    });
+
+    this.qualityCacheValid = false;
+    this.reportAssembler.invalidate();
+    this.emitter.emit('tokenizerChanged', result);
+  }
+
+  /** Change or remove the embedding provider. */
+  async setEmbeddingProvider(
+    provider: EmbeddingProvider | null,
+    metadata?: EmbeddingProviderMetadata,
+  ): Promise<void> {
+    if (provider === null) {
+      const result = this.embedding.removeProvider(() => {
+        this.similarity.clearCache();
+      });
+      this.qualityCacheValid = false;
+      this.reportAssembler.invalidate();
+      this.emitter.emit('embeddingProviderChanged', { oldName: result.oldName, newName: null });
+      return;
+    }
+
+    const result = await this.embedding.setProvider(
+      provider,
+      metadata!,
+      this.getActiveContentIterable(),
+      () => { this.similarity.clearCache(); },
+    );
+    this.qualityCacheValid = false;
+    this.reportAssembler.invalidate();
+    this.emitter.emit('embeddingProviderChanged', { oldName: result.oldName, newName: result.newName });
+  }
+
+  /** Get tokenizer info. */
+  getTokenizerInfo(): TokenizerMetadata {
+    return deepCopy(this.tokenizer.getInfo());
+  }
+
+  /** Get embedding provider info, or null if in trigram mode. */
+  getEmbeddingProviderInfo(): EmbeddingProviderMetadata | null {
+    const meta = this.embedding.getProviderMetadata();
+    return meta !== null ? deepCopy(meta) : null;
+  }
+
+  // ── Capacity Management ─────────────────────────────────────────
+
+  /** Update the token capacity. */
+  setCapacity(newCapacity: number): void {
+    if (!Number.isInteger(newCapacity) || newCapacity <= 0) {
+      throw new ValidationError('Capacity must be a positive integer', { capacity: newCapacity });
+    }
+    const oldCapacity = this.capacity;
+    this.capacity = newCapacity;
+    this.qualityCacheValid = false;
+    this.emitter.emit('capacityChanged', { oldCapacity, newCapacity });
+  }
+
+  // ── Pattern Registration ────────────────────────────────────────
+
+  /** Register a custom detection pattern. */
+  registerPattern(definition: PatternDefinition): void {
+    const def = deepCopy(definition);
+    this.detection.registerPattern(def);
+    this.emitter.emit('customPatternRegistered', { name: def.name, description: def.description });
+  }
+
+  // ── Inspection ──────────────────────────────────────────────────
+
+  /** Get the quality baseline snapshot, or null if not captured. */
+  getBaseline(): BaselineSnapshot | null {
+    const snap = this.baseline.getSnapshot();
+    return snap !== null ? deepCopy(snap) : null;
+  }
+
+  /** Get the session start timestamp. */
+  getConstructionTimestamp(): number {
+    return this.constructionTimestamp;
+  }
+
+  /** Get the config used to construct this instance. */
+  getConfig(): ContextLensConfig {
+    return deepCopy(this.configSnapshot);
+  }
+
+  /** Get evicted segments. */
+  getEvictedSegments(): Segment[] {
+    return this.store.getEvictedSegments().map(s => deepCopy(s));
+  }
+
+  /** Get performance instrumentation module (for diagnostics). */
+  getPerformance(): PerformanceInstrumentation {
+    return this.perf;
+  }
+
+  /** Get detection engine (for diagnostics). */
+  getDetection(): DetectionEngine {
+    return this.detection;
   }
 
   // ── Internal Helpers ────────────────────────────────────────────
@@ -473,12 +686,8 @@ export class ContextLens {
     );
   }
 
-  private captureBaseline(): void {
-    // Build a quick assessment context to get raw scores for baseline
+  private buildAssessmentContext(): AssessmentContext {
     const segments = this.store.getOrderedActiveSegments();
-    if (segments.length === 0) return;
-
-    const capacity = this.computeCapacity();
     const scoringSegments: ScoringSegment[] = segments.map(s => ({
       id: s.id,
       content: s.content,
@@ -498,19 +707,29 @@ export class ContextLens {
       groups.set(g.groupId, [...g.members]);
     }
 
-    const ctx: AssessmentContext = {
+    return {
       orderedSegments: scoringSegments,
       groups,
-      capacity,
+      capacity: this.computeCapacity(),
       tokenizerMetadata: this.tokenizer.getInfo(),
     };
+  }
 
-    // This triggers baseline capture inside the assembler
+  private captureBaseline(): void {
+    const segments = this.store.getOrderedActiveSegments();
+    if (segments.length === 0) return;
+
+    const ctx = this.buildAssessmentContext();
     const report = this.reportAssembler.assess(ctx);
     if (report.baseline !== null) {
       this.emitter.emit('baselineCaptured', { baseline: deepCopy(report.baseline) });
     }
     this.cachedReport = report;
     this.qualityCacheValid = true;
+  }
+
+  private getActiveContentIterable(): Iterable<{ hash: number; content: string }> {
+    const segments = this.store.getOrderedActiveSegments();
+    return segments.map(s => ({ hash: fnv1a(s.content), content: s.content }));
   }
 }
