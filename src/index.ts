@@ -37,8 +37,10 @@ import { EvictionAdvisory, type PlanOptions } from './eviction.js';
 import { PerformanceInstrumentation } from './performance.js';
 import { ContinuityTracker } from './scoring/continuity.js';
 import { BaselineManager } from './scoring/baseline.js';
+import { DiagnosticsManager } from './diagnostics.js';
 import { deepCopy } from './utils/copy.js';
 import { fnv1a } from './utils/hash.js';
+import type { DiagnosticSnapshot } from './types.js';
 
 // ─── Config ───────────────────────────────────────────────────────
 
@@ -83,6 +85,7 @@ export class ContextLens {
   private readonly detection: DetectionEngine;
   private readonly evictionAdvisory: EvictionAdvisory;
   private readonly perf: PerformanceInstrumentation;
+  private readonly diagnosticsManager: DiagnosticsManager;
 
   // ── Instance state ──────────────────────────────────────────
   private readonly constructionTimestamp: number;
@@ -162,11 +165,19 @@ export class ContextLens {
     // Step 13: Create performance module
     this.perf = new PerformanceInstrumentation();
 
-    // Step 14: Set up embedding provider if provided
-    if (config.embeddingProvider != null) {
-      // Synchronous setup — actual embedding prep happens lazily
-      // Provider is set but embeddings are computed on demand during assess()
-    }
+    // Step 14: Create diagnostics module
+    this.diagnosticsManager = new DiagnosticsManager({
+      emitter: this.emitter,
+      perf: this.perf,
+      detection: this.detection,
+      taskManager: this.taskManager,
+      continuity: this.continuity,
+      store: this.store,
+      tokenizer: this.tokenizer,
+      embedding: this.embedding,
+      similarity: this.similarity,
+      constructionTimestamp: this.constructionTimestamp,
+    });
   }
 
   // ── Config Validation ───────────────────────────────────────────
@@ -650,6 +661,11 @@ export class ContextLens {
   getBaseline(): BaselineSnapshot | null {
     const snap = this.baseline.getSnapshot();
     return snap !== null ? deepCopy(snap) : null;
+  }
+
+  /** Get full diagnostic snapshot. Tier 1 (< 1ms) — reads pre-maintained state. */
+  getDiagnostics(): DiagnosticSnapshot {
+    return this.diagnosticsManager.getDiagnostics();
   }
 
   /** Get the session start timestamp. */
