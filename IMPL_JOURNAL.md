@@ -58,7 +58,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | 4.1 | ContextLens class core: constructor, config validation, internal wiring, segment ops, group ops | `index.ts` | done |
 | 4.2 | ContextLens class extended: task ops, assess() call chain, planEviction(), provider management, capacity/inspection | `index.ts` (continued) | done |
 | 4.3 | Diagnostics: snapshot assembly, report history, rolling trends, pattern history, session timeline, warnings | `diagnostics.ts` | done |
-| 4.4 | Formatters: formatReport, formatDiagnostics, formatPattern (plain text, pure functions) | `formatters.ts` | |
+| 4.4 | Formatters: formatReport, formatDiagnostics, formatPattern (plain text, pure functions) | `formatters.ts` | done |
 | 4.5 | Phase 4 tests: integration tests (full flows), diagnostics unit tests, formatter tests | `test/integration/*`, `test/unit/*` | |
 
 ---
@@ -84,7 +84,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | 1 | 8 | 8 | — |
 | 2 | 10 | 10 | — |
 | 3 | 5 | 5 | — |
-| 4 | 5 | 3 | 4.4 |
+| 4 | 5 | 4 | 4.5 |
 | 5 | 5 | 0 | — |
 
 ---
