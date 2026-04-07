@@ -59,7 +59,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | 4.2 | ContextLens class extended: task ops, assess() call chain, planEviction(), provider management, capacity/inspection | `index.ts` (continued) | done |
 | 4.3 | Diagnostics: snapshot assembly, report history, rolling trends, pattern history, session timeline, warnings | `diagnostics.ts` | done |
 | 4.4 | Formatters: formatReport, formatDiagnostics, formatPattern (plain text, pure functions) | `formatters.ts` | done |
-| 4.5 | Phase 4 tests: integration tests (full flows), diagnostics unit tests, formatter tests | `test/integration/*`, `test/unit/*` | |
+| 4.5 | Phase 4 tests: integration tests (full flows), diagnostics unit tests, formatter tests | `test/integration/*`, `test/unit/*` | done |
 
 ---
 
@@ -84,7 +84,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | 1 | 8 | 8 | — |
 | 2 | 10 | 10 | — |
 | 3 | 5 | 5 | — |
-| 4 | 5 | 4 | 4.5 |
+| 4 | 5 | 5 | — |
 | 5 | 5 | 0 | — |
 
 ---
@@ -94,4 +94,4 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | Date | Tasks completed | Notes |
 |------|-----------------|-------|
 | 2026-04-06 | 1.1–1.8, 2.1–2.10 | Phase 1+2 complete: foundation + scoring engine (508 tests) |
-| 2026-04-07 | 3.1–3.5, 4.1 | Phase 3 complete + ContextLens core (653 tests) |
+| 2026-04-07 | 3.1–3.5, 4.1–4.5 | Phase 3+4 complete: detection, eviction, perf, API, diagnostics, formatters (698 tests) |
