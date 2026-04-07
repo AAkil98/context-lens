@@ -206,9 +206,43 @@ Key decisions made in Spec 13:
 - Convention-based naming: `context_lens.*` prefix, OTel semantic conventions
 - 6 invariants including read-only consumer, optional dependency, metric naming stability
 
+## Current state (implementation)
+
+**Phases 1–4 complete. Phase 5 (Enrichments) remaining.**
+
+28 of 33 tasks done. 698 tests passing across 28 test files. All typechecks clean.
+
+### What's built
+
+| Phase | Status | Modules |
+|-------|--------|---------|
+| 1 — Foundation | **Complete** | types, errors, events, utils (hash, LRU, ring buffer, copy), segment-store, tokenizer |
+| 2 — Scoring Engine | **Complete** | similarity, embedding, task, coherence/density/relevance/continuity scorers, baseline, composite, quality-report |
+| 3 — Detection & Advisory | **Complete** | detection (5 patterns, hysteresis, compounds, custom registration, fail-open, history), eviction (5-signal ranking, tiers, strategies, compaction), performance (timing, budgets, sampling) |
+| 4 — Public API & Diagnostics | **Complete** | ContextLens class (constructor, 8 segment ops, 4 group ops, task ops, assess, planEviction, provider mgmt, capacity), diagnostics (history, trends, timeline, warnings), formatters (3 pure functions) |
+| 5 — Enrichments | **Not started** | schemas, serialization, fleet, OTel, tests |
+
+### Key architecture decisions made during implementation
+
+- SegmentStore handles validation, protection checks, atomicity, token counting, and event emission internally — ContextLens is a thin orchestration layer adding embedding prep, continuity tracking, baseline capture, cache invalidation, and defensive copies
+- Detection engine records PatternHistoryEntry events internally; ContextLens reads the history diff after each detect() to fire public pattern events
+- Diagnostics module subscribes to the event emitter at construction and maintains state incrementally — getDiagnostics() is pure assembly, no recomputation
+- Quality cache uses a simple boolean flag (`qualityCacheValid`); any mutation sets it false, assess() sets it true after recompute
+- All async methods: setTask (embeds descriptor), setEmbeddingProvider (re-embeds all segments). Everything else is synchronous.
+
 ## What's next
 
-**Design spec review COMPLETE. Implementation specs COMPLETE. Ready for coding specs and code.**
+**Phase 5 — Enrichments (5 tasks remaining):**
+
+| Task | Description |
+|------|-------------|
+| 5.1 | Report schema: JSON Schema files (draft 2020-12), toJSON(), validate(), static schemas export |
+| 5.2 | Serialization: snapshot(), fromSnapshot(), format versioning, provider change detection |
+| 5.3 | Fleet monitor: ContextLensFleet class, assessFleet, aggregation, fleet events |
+| 5.4 | OTel export: ContextLensExporter, gauges, counters, histogram, log events |
+| 5.5 | Phase 5 tests: schema conformance, serialization round-trip, fleet/OTel unit tests |
+
+## Design review history
 
 ### Review progress
 
