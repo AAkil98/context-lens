@@ -46,7 +46,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | 3.1 | Detection framework: threshold evaluation, hysteresis state machine, 5 base patterns, suppression | `detection.ts` | done |
 | 3.2 | Compound patterns + custom registration: 6 compounds, PatternDefinition contract, fail-open, pattern history | `detection.ts` (continued) | done |
 | 3.3 | Eviction advisory: 5-signal ranking, protection tiers, strategies, auto-selection, group handling, bridge score, compaction, plan assembly | `eviction.ts` | done |
-| 3.4 | Performance instrumentation: per-operation timing, 3-way decomposition, budget violation detection, sampling config | `performance.ts` | |
+| 3.4 | Performance instrumentation: per-operation timing, 3-way decomposition, budget violation detection, sampling config | `performance.ts` | done |
 | 3.5 | Phase 3 tests: unit tests + detection/eviction property tests | `test/unit/*`, `test/property/*` | |
 
 ---
@@ -83,7 +83,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 |:-----:|:-----:|:----:|:-------:|
 | 1 | 8 | 8 | — |
 | 2 | 10 | 10 | — |
-| 3 | 5 | 3 | 3.4 |
+| 3 | 5 | 4 | 3.5 |
 | 4 | 5 | 0 | — |
 | 5 | 5 | 0 | — |
 
