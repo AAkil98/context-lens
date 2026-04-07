@@ -913,6 +913,38 @@ export class DetectionEngine {
       registrationOrder: i,
     }));
   }
+
+  // ── Serialization Restore ───────────────────────────────────────
+
+  /** @internal Used by fromSnapshot to restore pattern tracking state. */
+  _restoreFromSnapshot(snapshot: PatternTrackingSnapshot): void {
+    this.tracking.clear();
+    this.history.length = 0;
+
+    for (const [name, pts] of Object.entries(snapshot.perPattern)) {
+      const stats = snapshot.perPatternStats[name];
+      const state: TrackingState = {
+        active: pts.state === 'active',
+        severity: pts.currentSeverity,
+        activatedAt: pts.activatedAt,
+        severitySince: pts.severitySince,
+        peakSeverity: pts.peakSeverity,
+        peakAt: pts.peakAt,
+        reportCount: pts.reportCount,
+        scoreHistory: new RingBuffer(SCORE_HISTORY_CAPACITY),
+        resolvedAt: pts.resolvedAt,
+        consecutiveNulls: pts.consecutiveNulls,
+        activationCount: stats?.activationCount ?? 0,
+        totalActiveTime: stats?.totalActiveTime ?? 0,
+      };
+      for (const entry of pts.scoreHistory) {
+        state.scoreHistory.push(entry);
+      }
+      this.tracking.set(name, state);
+    }
+
+    this.history.push(...snapshot.history);
+  }
 }
 
 // ─── Utility Functions ────────────────────────────────────────────

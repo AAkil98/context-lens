@@ -294,4 +294,39 @@ export class ContinuityTracker {
   getLedger(): ContinuityEvent[] {
     return this.recentEvents.toArray();
   }
+
+  /** @internal Used by fromSnapshot to get internal counters. */
+  _getCounters(): { totalEvictionLoss: number; totalCompactionLoss: number; totalRecovery: number; totalInformationValue: number; totalTokensEverSeen: number; segmentContinuity: Record<string, number> } {
+    const segCont: Record<string, number> = {};
+    for (const [id, val] of this.segmentContinuity) {
+      segCont[id] = val;
+    }
+    return {
+      totalEvictionLoss: this.totalEvictionLoss,
+      totalCompactionLoss: this.totalCompactionLoss,
+      totalRecovery: this.totalRecovery,
+      totalInformationValue: this.totalInformationValue,
+      totalTokensEverSeen: this.totalTokensEverSeen,
+      segmentContinuity: segCont,
+    };
+  }
+
+  /** @internal Used by fromSnapshot to restore continuity state. */
+  _restoreFromSnapshot(
+    events: ContinuityEvent[],
+    counters: { totalEvictionLoss: number; totalCompactionLoss: number; totalRecovery: number; totalInformationValue: number; totalTokensEverSeen: number; segmentContinuity: Record<string, number> },
+  ): void {
+    this.totalEvictionLoss = counters.totalEvictionLoss;
+    this.totalCompactionLoss = counters.totalCompactionLoss;
+    this.totalRecovery = counters.totalRecovery;
+    this.totalInformationValue = counters.totalInformationValue;
+    this.totalTokensEverSeen = counters.totalTokensEverSeen;
+    this.segmentContinuity.clear();
+    for (const [id, val] of Object.entries(counters.segmentContinuity)) {
+      this.segmentContinuity.set(id, val);
+    }
+    for (const e of events) {
+      this.recentEvents.push({ ...e });
+    }
+  }
 }

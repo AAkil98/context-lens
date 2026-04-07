@@ -694,6 +694,15 @@ export interface CustomPatternMeta {
   registrationOrder: number;
 }
 
+export interface ContinuityCounters {
+  totalEvictionLoss: number;
+  totalCompactionLoss: number;
+  totalRecovery: number;
+  totalInformationValue: number;
+  totalTokensEverSeen: number;
+  segmentContinuity: Record<string, number>;
+}
+
 /** @see cl-spec-014 */
 export interface SerializedState {
   formatVersion: string;
@@ -710,6 +719,7 @@ export interface SerializedState {
   taskState: TaskState;
   baseline: BaselineSnapshot | null;
   continuityLedger: ContinuityEvent[];
+  continuityCounters: ContinuityCounters;
   patternTracking: PatternTrackingSnapshot;
   timeline: TimelineEntry[];
   reportHistory: ReportSummary[];

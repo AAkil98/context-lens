@@ -20,6 +20,8 @@ import type {
   TaskTransition,
   TaskState,
   BaselineSnapshot,
+  SerializedState,
+  SerializedConfig,
 } from './types.js';
 import {
   ConfigurationError,
@@ -748,6 +750,270 @@ export class ContextLens {
     const segments = this.store.getOrderedActiveSegments();
     return segments.map(s => ({ hash: fnv1a(s.content), content: s.content }));
   }
+
+  // ── Serialization ──────────────────────────────────────────────
+
+  /**
+   * Capture a complete, self-contained snapshot of instance state.
+   * @see cl-spec-014
+   */
+  snapshot(options?: { includeContent?: boolean }): SerializedState {
+    const includeContent = options?.includeContent ?? true;
+    const now = Date.now();
+    const restorable = includeContent;
+
+    // Segments: active + evicted, with position
+    const activeSegments = this.store.getOrderedActiveSegments();
+    const evictedSegments = this.store.getEvictedSegments();
+    const segments = [...activeSegments, ...evictedSegments].map((s, _i) => ({
+      id: s.id,
+      content: includeContent ? s.content : null,
+      tokenCount: s.tokenCount,
+      createdAt: s.createdAt,
+      updatedAt: s.updatedAt,
+      protection: s.protection as string,
+      importance: s.importance,
+      origin: s.origin,
+      tags: [...s.tags],
+      groupId: s.groupId,
+      state: s.state as string,
+      // Position: active segments have natural order; evicted get high positions
+      position: 0, // Will be set below
+    }));
+    // Set positions: use ordered active first, then evicted
+    for (let i = 0; i < activeSegments.length; i++) {
+      segments[i]!.position = i;
+    }
+    for (let i = 0; i < evictedSegments.length; i++) {
+      segments[activeSegments.length + i]!.position = activeSegments.length + i;
+    }
+
+    // Groups
+    const groups = this.store.listGroups().map(g => ({
+      groupId: g.groupId,
+      members: [...g.members],
+      protection: g.protection as string,
+      importance: g.importance,
+      origin: g.origin,
+      tags: [...g.tags],
+      state: g.state as string,
+      createdAt: g.createdAt,
+    }));
+
+    // Config
+    const config: SerializedConfig = {
+      capacity: this.capacity,
+      retainEvictedContent: this.configSnapshot.retainEvictedContent ?? true,
+      pinnedCeilingRatio: this.configSnapshot.pinnedCeilingRatio ?? 0.5,
+      patternThresholds: this.configSnapshot.patternThresholds ?? null,
+      suppressedPatterns: this.configSnapshot.suppressedPatterns ?? [],
+      hysteresisMargin: this.configSnapshot.hysteresisMargin ?? 0.03,
+      tokenCacheSize: this.configSnapshot.tokenCacheSize ?? 4096,
+      embeddingCacheSize: this.configSnapshot.embeddingCacheSize ?? 4096,
+    };
+
+    // Provider metadata
+    const tokenizerInfo = this.tokenizer.getInfo();
+    const embeddingMeta = this.embedding.getProviderMetadata();
+    const providerMetadata = {
+      tokenizer: {
+        name: tokenizerInfo.name,
+        accuracy: tokenizerInfo.accuracy,
+        modelFamily: tokenizerInfo.modelFamily,
+        errorBound: tokenizerInfo.errorBound,
+      },
+      embedding: embeddingMeta !== null ? {
+        name: embeddingMeta.name,
+        dimensions: embeddingMeta.dimensions,
+        modelFamily: embeddingMeta.modelFamily,
+      } : null,
+    };
+
+    // Diagnostics
+    const diag = this.diagnosticsManager.getDiagnostics();
+    const maxSequence = diag.timeline.length > 0
+      ? Math.max(...diag.timeline.map(t => t.sequence))
+      : 0;
+
+    const state: SerializedState = {
+      formatVersion: FORMAT_VERSION,
+      schemaVersion: '1.0.0',
+      timestamp: now,
+      restorable,
+      instanceId: `cl-${now}-${Math.random().toString(36).slice(2, 8)}`,
+      sessionStartedAt: this.constructionTimestamp,
+      sessionDuration: now - this.constructionTimestamp,
+      config,
+      providerMetadata,
+      segments,
+      groups,
+      taskState: deepCopy(this.taskManager.getState()),
+      baseline: this.baseline.getSnapshot(),
+      continuityLedger: deepCopy(this.continuity.getLedger()),
+      continuityCounters: deepCopy(this.continuity._getCounters()),
+      patternTracking: deepCopy(this.detection.getTrackingSnapshot()),
+      timeline: deepCopy(diag.timeline),
+      reportHistory: deepCopy(diag.reportHistory.reports),
+      rollingTrend: diag.reportHistory.rollingTrend !== null ? deepCopy(diag.reportHistory.rollingTrend) : null,
+      warnings: deepCopy(diag.warnings),
+      customPatternMetadata: deepCopy(this.detection.getCustomPatternMeta()),
+      assessCount: diag.reportHistory.reports.length,
+      mutationCount: maxSequence,
+    };
+
+    this.emitter.emit('stateSnapshotted', {
+      timestamp: now,
+      restorable,
+      segmentCount: activeSegments.length,
+      sizeEstimate: JSON.stringify(state).length,
+    });
+
+    return state;
+  }
+
+  /**
+   * Create a fully functional instance from a serialized snapshot.
+   * @see cl-spec-014
+   */
+  static fromSnapshot(state: SerializedState, restoreConfig?: RestoreConfig): ContextLens {
+    // Step 1: Validate format version
+    if (state.formatVersion !== FORMAT_VERSION) {
+      throw new ConfigurationError(
+        `Unsupported snapshot format: ${state.formatVersion}. Expected: ${FORMAT_VERSION}`,
+        { formatVersion: state.formatVersion },
+      );
+    }
+
+    // Step 2: Validate restorable
+    if (!state.restorable) {
+      throw new ConfigurationError(
+        'Cannot restore from a lightweight snapshot (includeContent: false)',
+        { restorable: false },
+      );
+    }
+
+    // Step 3: Merge config
+    const mergedConfig: ContextLensConfig = {
+      capacity: restoreConfig?.capacity ?? state.config.capacity,
+      tokenizer: restoreConfig?.tokenizer ?? 'approximate',
+      retainEvictedContent: state.config.retainEvictedContent,
+      pinnedCeilingRatio: state.config.pinnedCeilingRatio,
+      hysteresisMargin: state.config.hysteresisMargin,
+      tokenCacheSize: state.config.tokenCacheSize,
+      embeddingCacheSize: state.config.embeddingCacheSize,
+    };
+    if (restoreConfig?.embeddingProvider !== undefined) {
+      mergedConfig.embeddingProvider = restoreConfig.embeddingProvider;
+    }
+    if (restoreConfig?.embeddingProviderMetadata !== undefined) {
+      mergedConfig.embeddingProviderMetadata = restoreConfig.embeddingProviderMetadata;
+    }
+    if (state.config.patternThresholds !== null) {
+      mergedConfig.patternThresholds = state.config.patternThresholds;
+    }
+    if (state.config.suppressedPatterns.length > 0) {
+      mergedConfig.suppressedPatterns = state.config.suppressedPatterns;
+    }
+    if (restoreConfig?.customPatterns !== undefined) {
+      mergedConfig.customPatterns = restoreConfig.customPatterns;
+    }
+
+    // Step 4: Create instance
+    const instance = new ContextLens(mergedConfig);
+
+    // Step 5: Restore segments and groups
+    instance.store._restoreFromSnapshot(state.segments, state.groups);
+
+    // Step 6: Restore task state
+    instance.taskManager._restoreFromSnapshot(state.taskState);
+
+    // Step 7: Restore baseline
+    if (state.baseline !== null) {
+      instance.baseline.restoreSnapshot(state.baseline);
+    }
+
+    // Step 8: Restore continuity
+    instance.continuity._restoreFromSnapshot(
+      state.continuityLedger,
+      state.continuityCounters,
+    );
+
+    // Step 9: Restore detection tracking
+    instance.detection._restoreFromSnapshot(state.patternTracking);
+
+    // Step 10: Restore diagnostics
+    const maxSequence = state.timeline.length > 0
+      ? Math.max(...state.timeline.map(t => t.sequence))
+      : 0;
+    instance.diagnosticsManager._restoreFromSnapshot({
+      timeline: state.timeline,
+      reportHistory: state.reportHistory,
+      rollingTrend: state.rollingTrend,
+      warnings: state.warnings,
+      sequence: maxSequence + 1,
+    });
+
+    // Step 11: Set internal flags
+    instance.seeded = true;
+    instance.hasAdds = true;
+    instance.qualityCacheValid = false;
+    instance.cachedReport = null;
+
+    // Step 12: Provider change detection
+    const currentTokenizerInfo = instance.tokenizer.getInfo();
+    if (currentTokenizerInfo.name !== state.providerMetadata.tokenizer.name) {
+      // Different tokenizer — recount all segments
+      for (const seg of instance.store.getActiveSegmentIterator()) {
+        const newCount = instance.tokenizer.count(seg.content);
+        instance.store.setSegmentTokenCount(seg.id, newCount);
+      }
+    }
+
+    // Embedding provider change detection
+    const currentEmbeddingMeta = instance.embedding.getProviderMetadata();
+    const snapshotEmbeddingName = state.providerMetadata.embedding?.name ?? null;
+    const currentEmbeddingName = currentEmbeddingMeta?.name ?? null;
+    if (currentEmbeddingName !== snapshotEmbeddingName) {
+      // Different embedding provider — embeddings rebuild lazily on first assess()
+      instance.similarity.clearCache();
+    }
+
+    // Step 13: Emit stateRestored
+    const currentTokInfo = instance.tokenizer.getInfo();
+    const curEmbMeta = instance.embedding.getProviderMetadata();
+    const providerChanged =
+      currentTokInfo.name !== state.providerMetadata.tokenizer.name ||
+      (curEmbMeta?.name ?? null) !== (state.providerMetadata.embedding?.name ?? null);
+    const customPatternsRestored = restoreConfig?.customPatterns
+      ? restoreConfig.customPatterns.filter(p => state.customPatternMetadata.some(m => m.name === p.name)).length
+      : 0;
+    const customPatternsUnmatched = state.customPatternMetadata
+      .filter(m => !restoreConfig?.customPatterns?.some(p => p.name === m.name)).length;
+
+    instance.emitter.emit('stateRestored', {
+      formatVersion: state.formatVersion,
+      segmentCount: instance.store.segmentCount,
+      providerChanged,
+      customPatternsRestored,
+      customPatternsUnmatched,
+    });
+
+    return instance;
+  }
+}
+
+// ─── Serialization Constants ─────────────────────────────────────
+
+const FORMAT_VERSION = 'context-lens-snapshot-v1';
+
+// ─── RestoreConfig ───────────────────────────────────────────────
+
+export interface RestoreConfig {
+  capacity?: number;
+  tokenizer?: TokenizerProvider | 'approximate';
+  embeddingProvider?: EmbeddingProvider | null;
+  embeddingProviderMetadata?: EmbeddingProviderMetadata;
+  customPatterns?: PatternDefinition[];
 }
 
 // ─── Schema re-exports ───────────────────────────────────────────

@@ -5,6 +5,7 @@
 
 import type {
   Segment,
+  SegmentState,
   Group,
   ProtectionLevel,
   EvictionRecord,
@@ -730,5 +731,56 @@ export class SegmentStore {
       if (seg !== undefined) total += seg.tokenCount;
     }
     return total;
+  }
+
+  // ── Serialization Restore ───────────────────────────────────────
+
+  /** @internal Used by fromSnapshot to restore segments and groups. */
+  _restoreFromSnapshot(
+    segments: { id: string; content: string | null; tokenCount: number; createdAt: number; updatedAt: number; protection: string; importance: number; origin: string | null; tags: string[]; groupId: string | null; state: string; position: number }[],
+    groups: { groupId: string; members: string[]; protection: string; importance: number; origin: string | null; tags: string[]; state: string; createdAt: number }[],
+  ): void {
+    this.active.clear();
+    this.evicted.clear();
+    this.groups.clear();
+
+    let maxPosition = -1;
+    for (const s of segments) {
+      const seg: InternalSegment = {
+        id: s.id,
+        content: s.content ?? '',
+        tokenCount: s.tokenCount,
+        createdAt: s.createdAt,
+        updatedAt: s.updatedAt,
+        protection: s.protection as ProtectionLevel,
+        importance: s.importance,
+        state: s.state as SegmentState,
+        origin: s.origin,
+        tags: [...s.tags],
+        groupId: s.groupId,
+        position: s.position,
+        contentHash: s.content !== null ? fnv1a(s.content) : 0,
+      };
+      if (s.state === 'active') {
+        this.active.set(s.id, seg);
+      } else {
+        this.evicted.set(s.id, seg);
+      }
+      if (s.position > maxPosition) maxPosition = s.position;
+    }
+    this.nextPosition = maxPosition + 1;
+
+    for (const g of groups) {
+      this.groups.set(g.groupId, {
+        groupId: g.groupId,
+        members: [...g.members],
+        protection: g.protection as ProtectionLevel,
+        importance: g.importance,
+        origin: g.origin,
+        tags: [...g.tags],
+        createdAt: g.createdAt,
+        state: g.state as 'active' | 'dissolved',
+      });
+    }
   }
 }

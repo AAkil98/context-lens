@@ -350,4 +350,23 @@ export class TaskManager {
   isActive(): boolean {
     return this.currentTask !== null;
   }
+
+  /** @internal Used by fromSnapshot to restore task state. */
+  _restoreFromSnapshot(state: TaskState): void {
+    this.currentTask = state.currentTask !== null ? { ...state.currentTask } : null;
+    this.previousTask = state.previousTask !== null ? { ...state.previousTask } : null;
+    this.taskSetAt = state.taskSetAt;
+    this.transitionCount = state.transitionCount;
+    this.changeCount = state.changeCount;
+    this.refinementCount = state.refinementCount;
+    this.reportsSinceSet = state.reportsSinceSet;
+    this.reportsSinceTransition = state.reportsSinceTransition;
+    this.lastTransition = state.lastTransition !== null ? { ...state.lastTransition } : null;
+    this.gracePeriodActive = state.gracePeriodActive;
+    this.gracePeriodRemaining = state.gracePeriodRemaining;
+    this.currentDescHash = this.currentTask !== null ? fnv1a(this.currentTask.description) : null;
+    for (const entry of state.transitionHistory) {
+      this.history.push({ ...entry });
+    }
+  }
 }

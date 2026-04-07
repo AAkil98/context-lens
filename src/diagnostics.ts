@@ -314,4 +314,32 @@ export class DiagnosticsManager {
       },
     };
   }
+
+  // ── Serialization Restore ───────────────────────────────────────
+
+  /** @internal Used by fromSnapshot to restore diagnostics state. */
+  _restoreFromSnapshot(state: {
+    timeline: TimelineEntry[];
+    reportHistory: ReportSummary[];
+    rollingTrend: RollingTrend | null;
+    warnings: Warning[];
+    sequence: number;
+  }): void {
+    for (const entry of state.timeline) {
+      this.timeline.push({ ...entry });
+    }
+    for (const report of state.reportHistory) {
+      this.reportHistory.push({ ...report });
+    }
+    this.rollingTrend = state.rollingTrend !== null ? { ...state.rollingTrend } : null;
+    this.warnings.length = 0;
+    this.warnings.push(...state.warnings.map(w => ({ ...w })));
+    this.sequence = state.sequence;
+    // latestReport stays null — first assess() after restore recomputes
+  }
+
+  /** @internal Returns current sequence number for snapshot. */
+  _getSequence(): number {
+    return this.sequence;
+  }
 }
