@@ -1753,4 +1753,61 @@ describe('EvictionAdvisory', () => {
       expect(plan.candidates[0]!.scores.redundancy).toBe(0);
     });
   });
+
+  // ── Phase C: Branch coverage additions ───────────────────────
+
+  describe('all pinned — exhausted', () => {
+    it('returns exhausted=true with empty candidates when all segments are pinned', () => {
+      const segments = [
+        makeSegment('p1', { protection: 'pinned', tokenCount: 200 }),
+        makeSegment('p2', { protection: 'pinned', tokenCount: 200 }),
+      ];
+      const advisory = makeAdvisory(segments);
+      const report = makeReport({
+        segments: segments.map(s => makeSegmentScore(s.id, { tokenCount: s.tokenCount })),
+        segmentCount: 2,
+        capacity: { totalActiveTokens: 400, capacity: 300, utilization: 1.33 },
+      });
+      const plan = advisory.planEviction(report, { targetTokens: 100 });
+      expect(plan.candidates).toHaveLength(0);
+      expect(plan.exhausted).toBe(true);
+      expect(plan.targetMet).toBe(false);
+      expect(plan.shortfall).toBeGreaterThan(0);
+    });
+  });
+
+  describe('target met exactly', () => {
+    it('targetMet is true when total reclaimable equals target', () => {
+      const segments = [
+        makeSegment('e1', { tokenCount: 100, protection: 'default' }),
+        makeSegment('e2', { tokenCount: 100, protection: 'default' }),
+      ];
+      const advisory = makeAdvisory(segments);
+      const report = makeReport({
+        segments: segments.map(s => makeSegmentScore(s.id, { tokenCount: s.tokenCount })),
+        segmentCount: 2,
+        capacity: { totalActiveTokens: 200, capacity: 150, utilization: 1.33 },
+      });
+      const plan = advisory.planEviction(report, { targetTokens: 200 });
+      expect(plan.targetMet).toBe(true);
+      expect(plan.shortfall).toBe(0);
+    });
+  });
+
+  describe('strategy auto-selection from compounds', () => {
+    it('lossDominates compound selects collapse strategy', () => {
+      const segments = [makeSegment('c1'), makeSegment('c2')];
+      const advisory = makeAdvisory(segments);
+      const report = makeReport({
+        segments: segments.map(s => makeSegmentScore(s.id)),
+        segmentCount: 2,
+        patterns: makeDetection([
+          makeActivePattern('collapse', { compoundContext: makeCompound('lossDominates', ['collapse', 'saturation']) }),
+          makeActivePattern('saturation'),
+        ]),
+      });
+      const plan = advisory.planEviction(report, { targetTokens: 50 });
+      expect(plan.strategy).toBe('collapse');
+    });
+  });
 });

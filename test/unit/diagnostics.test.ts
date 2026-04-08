@@ -427,4 +427,66 @@ describe('DiagnosticsManager', () => {
       expect(entry!.detail).toEqual({ name: 'erosion', severity: 'watch' });
     });
   });
+
+  // ── Phase C: Branch coverage additions ───────────────────────
+
+  describe('Performance summary with zero operations', () => {
+    it('returns empty operation timings when no operations have run', () => {
+      const deps = createDeps();
+      const diag = new DiagnosticsManager(deps);
+      const snapshot = diag.getDiagnostics();
+      expect(snapshot.performance).toBeDefined();
+      expect(snapshot.performance.budgetViolationCount).toBe(0);
+      expect(snapshot.performance.sessionSelfTime).toBe(0);
+    });
+  });
+
+  describe('Rolling trend with exactly 2 reports', () => {
+    it('computes a rolling trend with 2 data points', () => {
+      const deps = createDeps();
+      const diag = new DiagnosticsManager(deps);
+
+      // Emit 2 reportGenerated events
+      deps.emitter.emit('reportGenerated', { report: makeReport({
+        windowScores: { coherence: 0.8, density: 0.7, relevance: 0.6, continuity: 0.9 },
+        reportId: 'r1', composite: 0.75,
+      }) });
+      deps.emitter.emit('reportGenerated', { report: makeReport({
+        windowScores: { coherence: 0.7, density: 0.6, relevance: 0.5, continuity: 0.8 },
+        reportId: 'r2', composite: 0.65,
+      }) });
+
+      const snapshot = diag.getDiagnostics();
+      expect(snapshot.reportHistory.reports).toHaveLength(2);
+      // Rolling trend should be computed with 2 reports
+      expect(snapshot.reportHistory.rollingTrend).not.toBeNull();
+    });
+  });
+
+  describe('Anomaly attribution', () => {
+    it('attributes anomaly cause from recent timeline events', () => {
+      const deps = createDeps();
+      const diag = new DiagnosticsManager(deps);
+
+      // Simulate a task change in timeline
+      deps.emitter.emit('taskChanged', { transition: { type: 'change', previousTask: null } as never });
+
+      // First report (no anomaly yet)
+      deps.emitter.emit('reportGenerated', { report: makeReport({
+        windowScores: { coherence: 0.9, density: 0.9, relevance: 0.9, continuity: 0.9 },
+        reportId: 'a1', composite: 0.9,
+      }) });
+
+      // Second report with large relevance drop (>0.15 delta triggers anomaly)
+      deps.emitter.emit('reportGenerated', { report: makeReport({
+        windowScores: { coherence: 0.9, density: 0.9, relevance: 0.5, continuity: 0.9 },
+        reportId: 'a2', composite: 0.7,
+      }) });
+
+      const snapshot = diag.getDiagnostics();
+      const latestSummary = snapshot.reportHistory.reports[snapshot.reportHistory.reports.length - 1]!;
+      // Should have flagged anomalies due to large relevance delta
+      expect(latestSummary.anomalies.length).toBeGreaterThanOrEqual(1);
+    });
+  });
 });

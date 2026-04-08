@@ -232,4 +232,59 @@ describe('PerformanceInstrumentation', () => {
       expect(perf.getOperationTier('unknownOp')).toBe(5);
     });
   });
+
+  // ── Phase C: Branch coverage additions ───────────────────────
+
+  describe('P95 with few samples', () => {
+    it('computes P95 correctly with only 2 samples', () => {
+      const perf = new PerformanceInstrumentation();
+
+      // Record 2 operations with known selfTimes
+      const ctx1 = perf.startOperation('assess', 10);
+      // Simulate fast operation
+      perf.endOperation(ctx1, 0, 0, 0, 0);
+
+      const ctx2 = perf.startOperation('assess', 10);
+      perf.endOperation(ctx2, 0, 0, 0, 0);
+
+      const stats = perf.getOperationStats();
+      expect(stats['assess']).toBeDefined();
+      expect(stats['assess']!.count).toBe(2);
+      expect(stats['assess']!.p95SelfTime).toBeGreaterThanOrEqual(0);
+    });
+
+    it('computes P95 with a single sample', () => {
+      const perf = new PerformanceInstrumentation();
+      const ctx = perf.startOperation('add', 5);
+      perf.endOperation(ctx, 0, 0, 0, 0);
+
+      const stats = perf.getOperationStats();
+      expect(stats['add']!.count).toBe(1);
+      expect(stats['add']!.p95SelfTime).toBeGreaterThanOrEqual(0);
+      // With 1 sample, p95 = that sample
+      expect(stats['add']!.p95SelfTime).toBe(stats['add']!.maxSelfTime);
+    });
+  });
+
+  describe('getPerformanceSummary', () => {
+    it('assembles full summary with session totals', () => {
+      const perf = new PerformanceInstrumentation();
+
+      const ctx = perf.startOperation('assess', 10);
+      perf.endOperation(ctx, 1, 0.5, 2, 3);
+
+      const caches = {
+        tokenCache: { hits: 0, misses: 0, hitRate: null, currentEntries: 0, maxEntries: 0, utilization: 0, evictions: 0 },
+        embeddingCache: { hits: 0, misses: 0, hitRate: null, currentEntries: 0, maxEntries: 0, utilization: 0, evictions: 0 },
+        similarityCache: { hits: 0, misses: 0, hitRate: null, currentEntries: 0, maxEntries: 0, utilization: 0, evictions: 0 },
+      };
+
+      const summary = perf.getPerformanceSummary(caches);
+      expect(summary.operationTimings).toBeDefined();
+      expect(summary.caches).toBe(caches);
+      expect(summary.sessionSelfTime).toBeGreaterThanOrEqual(0);
+      expect(summary.sessionProviderTime).toBeGreaterThanOrEqual(0);
+      expect(typeof summary.budgetViolationCount).toBe('number');
+    });
+  });
 });

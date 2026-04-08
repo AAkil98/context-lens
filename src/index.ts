@@ -261,6 +261,7 @@ export class ContextLens {
 
     this.seeded = true;
     this.qualityCacheValid = false;
+    this.reportAssembler.invalidate();
     return results;
   }
 
@@ -281,6 +282,7 @@ export class ContextLens {
 
     this.hasAdds = true;
     this.qualityCacheValid = false;
+    this.reportAssembler.invalidate();
 
     // Prepare embedding
     const hash = fnv1a(content);
@@ -302,6 +304,7 @@ export class ContextLens {
     }
 
     this.qualityCacheValid = false;
+    this.reportAssembler.invalidate();
     return deepCopy(result);
   }
 
@@ -316,6 +319,7 @@ export class ContextLens {
     this.similarity.invalidateContentHash(hash);
 
     this.qualityCacheValid = false;
+    this.reportAssembler.invalidate();
     return deepCopy(result);
   }
 
@@ -343,6 +347,7 @@ export class ContextLens {
     );
 
     this.qualityCacheValid = false;
+    this.reportAssembler.invalidate();
     return deepCopy(result);
   }
 
@@ -357,6 +362,7 @@ export class ContextLens {
     }
 
     this.qualityCacheValid = false;
+    this.reportAssembler.invalidate();
     return results.map(s => deepCopy(s));
   }
 
@@ -378,6 +384,7 @@ export class ContextLens {
     }
 
     this.qualityCacheValid = false;
+    this.reportAssembler.invalidate();
     const copied = records.map(r => deepCopy(r));
     return copied.length === 1 ? copied[0]! : copied;
   }
@@ -402,6 +409,7 @@ export class ContextLens {
     }
 
     this.qualityCacheValid = false;
+    this.reportAssembler.invalidate();
     const copied = results.map(s => deepCopy(s));
     return copied.length === 1 ? copied[0]! : copied;
   }
@@ -645,6 +653,7 @@ export class ContextLens {
     const oldCapacity = this.capacity;
     this.capacity = newCapacity;
     this.qualityCacheValid = false;
+    this.reportAssembler.invalidate();
     this.emitter.emit('capacityChanged', { oldCapacity, newCapacity });
   }
 

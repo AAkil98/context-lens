@@ -750,4 +750,81 @@ describe('SegmentStore', () => {
       expect(store.groupCount).toBe(1);
     });
   });
+
+  // ── Phase C: Branch coverage additions ───────────────────────
+
+  describe('auto-ID collision with suffix', () => {
+    it('appends suffix when auto-generated ID already exists in evicted map', () => {
+      const { store } = createTestHarness();
+      // Add first segment — gets auto:HASH
+      const seg1 = store.add('unique collision test content alpha');
+      expect(isSegment(seg1)).toBe(true);
+      const id1 = (seg1 as Segment).id;
+      expect(id1).toMatch(/^auto:/);
+      expect(id1).not.toContain(':1');
+
+      // Evict the first segment so its ID is still in the evicted map
+      store.evict(id1);
+
+      // Add different content that happens to produce same hash is unlikely,
+      // but we can test the suffix path by adding same content after eviction.
+      // Dedup checks active map only, so evicted content won't trigger DuplicateSignal.
+      const seg2 = store.add('unique collision test content alpha');
+      expect(isSegment(seg2)).toBe(true);
+      const id2 = (seg2 as Segment).id;
+      // The base auto:HASH is in evicted, so suffix is appended
+      expect(id2).toMatch(/^auto:.*:1$/);
+    });
+  });
+
+  describe('group token recomputation', () => {
+    it('group tokenCount reflects sum of member tokenCounts', () => {
+      const { store } = createTestHarness();
+      const s1 = store.add('short content', { id: 'gt-1' }) as Segment;
+      const s2 = store.add('another piece of short content here for testing', { id: 'gt-2' }) as Segment;
+      const group = store.createGroup('gt-g', ['gt-1', 'gt-2']);
+      expect(group.tokenCount).toBe(s1.tokenCount + s2.tokenCount);
+    });
+  });
+
+  describe('restore with content override', () => {
+    it('restores evicted segment with new content when provided', () => {
+      const { store } = createTestHarness();
+      store.add('original content for restore test', { id: 'rco-1' });
+      store.evict('rco-1');
+      const restored = store.restore('rco-1', { content: 'new replacement content' });
+      expect(restored).toHaveLength(1);
+      expect(restored[0]!.content).toBe('new replacement content');
+      expect(restored[0]!.state).toBe('active');
+    });
+  });
+
+  describe('evict without retained content', () => {
+    it('discards content when retainEvictedContent is false', () => {
+      const { store } = createTestHarness(false);
+      store.add('content to discard', { id: 'nrc-1' });
+      store.evict('nrc-1');
+      const evicted = store.getEvictedSegments();
+      expect(evicted).toHaveLength(1);
+      // Content should be empty or placeholder when not retained
+      expect(evicted[0]!.content).toBe('');
+    });
+  });
+
+  describe('position tracking after evict and restore', () => {
+    it('restored segment returns to original position in ordered list', () => {
+      const { store } = createTestHarness();
+      store.add('first segment', { id: 'pos-1' });
+      store.add('second segment', { id: 'pos-2' });
+      store.add('third segment', { id: 'pos-3' });
+
+      store.evict('pos-2');
+      const withoutSecond = store.getOrderedActiveSegments();
+      expect(withoutSecond.map(s => s.id)).toEqual(['pos-1', 'pos-3']);
+
+      store.restore('pos-2');
+      const restored = store.getOrderedActiveSegments();
+      expect(restored.map(s => s.id)).toEqual(['pos-1', 'pos-2', 'pos-3']);
+    });
+  });
 });

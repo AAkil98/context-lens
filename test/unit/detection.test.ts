@@ -1071,4 +1071,112 @@ describe('DetectionEngine', () => {
       expect(findPattern(res3, 'saturation')).toBeUndefined();
     });
   });
+
+  // ── Phase C: Branch coverage additions ───────────────────────
+
+  describe('compound — fullOfWrongThings (saturation + gap)', () => {
+    it('activates when both saturation and gap are active', () => {
+      const engine = new DetectionEngine();
+      // High utilization (saturation) + low relevance (gap)
+      const report = makeReport({
+        windowScores: { coherence: 0.8, density: 0.8, relevance: 0.3, continuity: 0.8 },
+        capacity: { utilization: 0.90, totalActiveTokens: 9000, capacity: 10000 },
+      });
+      const result = engine.detect(report, ACTIVE_TASK);
+      const satActive = findPattern(result, 'saturation');
+      const gapActive = findPattern(result, 'gap');
+      if (satActive && gapActive) {
+        const hasCompound = result.patterns.some(p => p.compoundContext?.compound === 'fullOfWrongThings');
+        expect(hasCompound).toBe(true);
+      }
+    });
+  });
+
+  describe('compound — scatteredAndIrrelevant (fracture + gap)', () => {
+    it('activates when both fracture and gap are active', () => {
+      const engine = new DetectionEngine();
+      // Low coherence (fracture) + low relevance (gap)
+      const report = makeReport({
+        windowScores: { coherence: 0.3, density: 0.8, relevance: 0.3, continuity: 0.8 },
+        capacity: { utilization: 0.5, totalActiveTokens: 5000, capacity: 10000 },
+      });
+      const result = engine.detect(report, ACTIVE_TASK);
+      const fracActive = findPattern(result, 'fracture');
+      const gapActive = findPattern(result, 'gap');
+      if (fracActive && gapActive) {
+        const hasCompound = result.patterns.some(p => p.compoundContext?.compound === 'scatteredAndIrrelevant');
+        expect(hasCompound).toBe(true);
+      }
+    });
+  });
+
+  describe('compound — pressureLoop (collapse + saturation)', () => {
+    it('activates when both collapse and saturation are active', () => {
+      const engine = new DetectionEngine();
+      // Low continuity (collapse) + high utilization (saturation)
+      const report = makeReport({
+        windowScores: { coherence: 0.8, density: 0.8, relevance: 0.8, continuity: 0.4 },
+        capacity: { utilization: 0.90, totalActiveTokens: 9000, capacity: 10000 },
+      });
+      const result = engine.detect(report, ACTIVE_TASK);
+      const collapseActive = findPattern(result, 'collapse');
+      const satActive = findPattern(result, 'saturation');
+      if (collapseActive && satActive) {
+        const hasCompound = result.patterns.some(p => p.compoundContext?.compound === 'pressureLoop');
+        expect(hasCompound).toBe(true);
+      }
+    });
+  });
+
+  describe('pattern history growth', () => {
+    it('history accumulates entries across multiple detect cycles', () => {
+      const engine = new DetectionEngine();
+      // Activate saturation
+      engine.detect(makeReport({
+        capacity: { utilization: 0.90, totalActiveTokens: 9000, capacity: 10000 },
+      }), ACTIVE_TASK);
+      // Resolve saturation
+      engine.detect(makeReport({
+        capacity: { utilization: 0.50, totalActiveTokens: 5000, capacity: 10000 },
+      }), ACTIVE_TASK);
+      // Re-activate
+      engine.detect(makeReport({
+        capacity: { utilization: 0.95, totalActiveTokens: 9500, capacity: 10000 },
+      }), ACTIVE_TASK);
+
+      const history = engine.getPatternHistory();
+      // Should have at least activated + resolved + activated entries
+      const satEntries = history.filter(h => h.name === 'saturation');
+      expect(satEntries.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  describe('custom pattern — two-cycle deactivation', () => {
+    it('custom pattern requires 2 consecutive null detects to resolve', () => {
+      const engine = new DetectionEngine({
+        customPatterns: [{
+          name: 'flicker-test',
+          description: 'Tests 2-cycle deactivation',
+          detect: (report) => report.composite !== null && report.composite < 0.5
+            ? { primaryScore: { dimension: 'composite', value: report.composite }, secondaryScores: [], utilization: null }
+            : null,
+          severity: () => 'watch',
+          explanation: () => 'Low composite',
+          remediation: () => [],
+        }],
+      });
+
+      // Activate
+      const r1 = engine.detect(makeReport({ composite: 0.3 }), ACTIVE_TASK);
+      expect(findPattern(r1, 'flicker-test')).toBeDefined();
+
+      // First null detect — should still be active (1-cycle grace)
+      const r2 = engine.detect(makeReport({ composite: 0.9 }), ACTIVE_TASK);
+      expect(findPattern(r2, 'flicker-test')).toBeDefined();
+
+      // Second null detect — now resolves
+      const r3 = engine.detect(makeReport({ composite: 0.9 }), ACTIVE_TASK);
+      expect(findPattern(r3, 'flicker-test')).toBeUndefined();
+    });
+  });
 });

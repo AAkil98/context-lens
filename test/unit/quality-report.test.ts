@@ -406,4 +406,61 @@ describe('QualityReportAssembler', () => {
     expect(typeof report.task.gracePeriodActive).toBe('boolean');
     expect(typeof report.task.gracePeriodRemaining).toBe('number');
   });
+
+  // ── Phase C: Branch coverage additions ─────────────────────
+
+  it('0 segments produces null composite and null window scores', () => {
+    const ctx = makeContext([]);
+    const report = assembler.assess(ctx);
+    expect(report.segmentCount).toBe(0);
+    expect(report.composite).toBeNull();
+    expect(report.windowScores.coherence).toBeNull();
+    expect(report.windowScores.continuity).toBeNull();
+    expect(report.segments).toHaveLength(0);
+    expect(report.groups).toHaveLength(0);
+  });
+
+  it('1 segment produces valid coherence without pairwise computation', () => {
+    const ctx = makeContext([seg1]);
+    const report = assembler.assess(ctx);
+    expect(report.segmentCount).toBe(1);
+    expect(report.composite).not.toBeNull();
+    expect(report.windowScores.coherence).not.toBeNull();
+    expect(report.segments).toHaveLength(1);
+  });
+
+  it('embedding mode falls back to trigrams when provider has no vectors', () => {
+    // Provider is set but no vectors are cached — should fall back to trigrams
+    const ctx = makeContext([seg1, seg2]);
+    const report = assembler.assess(ctx);
+    expect(report.embeddingMode).toBe('trigrams');
+  });
+
+  it('trend is non-null on second assess after invalidation', () => {
+    const ctx = makeContext([seg1, seg2]);
+    assembler.assess(ctx);
+    assembler.invalidate();
+    const report2 = assembler.assess(ctx);
+    expect(report2.trend).not.toBeNull();
+    expect(report2.trend!.previousReportId).toBeTruthy();
+    expect(typeof report2.trend!.coherenceDelta).toBe('number');
+    expect(typeof report2.trend!.segmentCountDelta).toBe('number');
+  });
+
+  it('cached report returns same object without recomputation', () => {
+    const ctx = makeContext([seg1, seg2]);
+    const r1 = assembler.assess(ctx);
+    // No invalidate() — should return cached
+    const r2 = assembler.assess(ctx);
+    expect(r1.reportId).toBe(r2.reportId);
+    expect(r1).toBe(r2); // Same reference from assembler cache
+  });
+
+  it('per-segment scores sorted by composite ascending', () => {
+    const ctx = makeContext([seg1, seg2, seg3]);
+    const report = assembler.assess(ctx);
+    for (let i = 1; i < report.segments.length; i++) {
+      expect(report.segments[i]!.composite).toBeGreaterThanOrEqual(report.segments[i - 1]!.composite);
+    }
+  });
 });

@@ -502,4 +502,64 @@ describe('Tokenizer.getInfo()', () => {
     info1.name = 'mutated';
     expect(tok.getInfo().name).toBe('approximate');
   });
+
+  // ── Phase C: Non-ASCII branch coverage ─────────────────────
+
+  describe('Non-ASCII character classes', () => {
+    it('CJK extension B (U+20000+) counted as non-zero', () => {
+      const result = APPROXIMATE_PROVIDER.count('\u{20000}\u{20001}');
+      expect(result).toBeGreaterThanOrEqual(1);
+    });
+
+    it('emoji counted as non-zero', () => {
+      const result = APPROXIMATE_PROVIDER.count('\u{1F600}\u{1F389}');
+      expect(result).toBeGreaterThanOrEqual(1);
+    });
+
+    it('combining diacritics processed correctly', () => {
+      const result = APPROXIMATE_PROVIDER.count('cafe\u0301');
+      expect(result).toBeGreaterThanOrEqual(1);
+    });
+
+    it('mixed ASCII + CJK + emoji produces reasonable token count', () => {
+      const text = 'Hello \u4E16\u754C \u{1F600}';
+      const result = APPROXIMATE_PROVIDER.count(text);
+      expect(result).toBeGreaterThanOrEqual(3);
+      expect(result).toBeLessThanOrEqual(10);
+    });
+
+    it('Hangul syllables counted as non-zero', () => {
+      const result = APPROXIMATE_PROVIDER.count('\uAC00\uAC01\uAC02');
+      expect(result).toBeGreaterThanOrEqual(1);
+    });
+
+    it('Arabic text counted as non-zero', () => {
+      const result = APPROXIMATE_PROVIDER.count('\u0645\u0631\u062D\u0628\u0627');
+      expect(result).toBeGreaterThanOrEqual(1);
+    });
+
+    it('whitespace-only returns 1 (min for non-empty)', () => {
+      const result = APPROXIMATE_PROVIDER.count('   \t  \n  ');
+      expect(result).toBe(1);
+    });
+
+    it('provider switch triggers recount on all active segments', () => {
+      const segs = [
+        makeSegment({ id: 'ps-1', content: 'hello world' }),
+        makeSegment({ id: 'ps-2', content: 'another segment' }),
+      ];
+      const counts: Record<string, number> = {};
+      const deps: TokenizerDeps = {
+        getActiveSegments: () => segs[Symbol.iterator](),
+        setSegmentTokenCount: (id: string, tc: number) => { counts[id] = tc; },
+      };
+
+      const tok = new Tokenizer('approximate', undefined, 256);
+      const custom = { count: () => 42 };
+      tok.switchProvider(custom, { name: 'fixed', accuracy: 'exact' as const, modelFamily: null, errorBound: null }, deps);
+
+      expect(counts['ps-1']).toBe(42);
+      expect(counts['ps-2']).toBe(42);
+    });
+  });
 });

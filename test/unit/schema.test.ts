@@ -220,4 +220,86 @@ describe('Schema — Unit Tests', () => {
       expect(qrCap).toBe(dsCap);
     });
   });
+
+  // ── Phase C: Branch coverage additions ───────────────────────
+
+  describe('validate() with oneOf (nullable) failure', () => {
+    it('rejects wrong non-null type for nullable field', () => {
+      const lens = makeLens();
+      lens.add(distinctContent(0));
+      lens.add(distinctContent(1));
+      const report = lens.assess();
+      const json = toJSON(report) as Record<string, unknown>;
+      // baseline can be null or BaselineSnapshot object — set to a string (wrong type)
+      json['baseline'] = 'not-an-object';
+      const result = validate.qualityReport(json);
+      expect(result.valid).toBe(false);
+      expect(result.errors.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('validate() with array constraints', () => {
+    it('rejects segments field as non-array', () => {
+      const lens = makeLens();
+      lens.add(distinctContent(0));
+      const report = lens.assess();
+      const json = toJSON(report) as Record<string, unknown>;
+      json['segments'] = 'not-an-array';
+      const result = validate.qualityReport(json);
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  describe('toJSON with all nullable fields populated', () => {
+    it('produces valid JSON when trend, baseline, and task are all populated', async () => {
+      const lens = makeLens();
+      lens.seed([{ content: distinctContent(0) }, { content: distinctContent(1) }]);
+      lens.add(distinctContent(2));
+      await lens.setTask({ description: 'Test task for full population', keywords: ['test'] });
+      lens.assess(); // First assessment (for trend computation)
+      lens.add(distinctContent(3));
+      const report = lens.assess(); // Second assessment (trend populated)
+      const json = toJSON(report);
+      const result = validate.qualityReport(json);
+      expect(result.valid).toBe(true);
+    });
+  });
+
+  describe('toJSON with null composite (empty window)', () => {
+    it('validates when composite is null', () => {
+      const lens = makeLens();
+      const report = lens.assess();
+      expect(report.composite).toBeNull();
+      const json = toJSON(report);
+      const result = validate.qualityReport(json);
+      expect(result.valid).toBe(true);
+    });
+  });
+
+  describe('validate() rejects incorrect nested object types', () => {
+    it('rejects capacity with string utilization', () => {
+      const lens = makeLens();
+      lens.add(distinctContent(0));
+      const report = lens.assess();
+      const json = toJSON(report) as Record<string, unknown>;
+      (json['capacity'] as Record<string, unknown>)['utilization'] = 'high';
+      const result = validate.qualityReport(json);
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  describe('Diagnostic snapshot validation edge cases', () => {
+    it('validates diagnostics with populated report history', () => {
+      const lens = makeLens();
+      lens.add(distinctContent(0));
+      lens.add(distinctContent(1));
+      lens.assess();
+      lens.add(distinctContent(2));
+      lens.assess();
+      const diag = lens.getDiagnostics();
+      const json = toJSON(diag);
+      const result = validate.diagnosticSnapshot(json);
+      expect(result.valid).toBe(true);
+    });
+  });
 });
