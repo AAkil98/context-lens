@@ -208,9 +208,7 @@ Key decisions made in Spec 13:
 
 ## Current state (implementation)
 
-**Phases 1–4 complete. Phase 5 (Enrichments) remaining.**
-
-28 of 33 tasks done. 698 tests passing across 28 test files. All typechecks clean.
+**All 5 phases complete. 33/33 tasks done. 794 tests passing across 34 test files. All typechecks clean.**
 
 ### What's built
 
@@ -220,27 +218,34 @@ Key decisions made in Spec 13:
 | 2 — Scoring Engine | **Complete** | similarity, embedding, task, coherence/density/relevance/continuity scorers, baseline, composite, quality-report |
 | 3 — Detection & Advisory | **Complete** | detection (5 patterns, hysteresis, compounds, custom registration, fail-open, history), eviction (5-signal ranking, tiers, strategies, compaction), performance (timing, budgets, sampling) |
 | 4 — Public API & Diagnostics | **Complete** | ContextLens class (constructor, 8 segment ops, 4 group ops, task ops, assess, planEviction, provider mgmt, capacity), diagnostics (history, trends, timeline, warnings), formatters (3 pure functions) |
-| 5 — Enrichments | **Not started** | schemas, serialization, fleet, OTel, tests |
+| 5 — Enrichments | **Complete** | schemas (JSON Schema draft 2020-12, toJSON, validate), serialization (snapshot/fromSnapshot, format versioning, provider change detection), fleet (ContextLensFleet, assessFleet, aggregation, fleet events), OTel (ContextLensExporter, 9 gauges, 6 counters, 1 histogram, 5 log events) |
 
 ### Key architecture decisions made during implementation
 
 - SegmentStore handles validation, protection checks, atomicity, token counting, and event emission internally — ContextLens is a thin orchestration layer adding embedding prep, continuity tracking, baseline capture, cache invalidation, and defensive copies
 - Detection engine records PatternHistoryEntry events internally; ContextLens reads the history diff after each detect() to fire public pattern events
 - Diagnostics module subscribes to the event emitter at construction and maintains state incrementally — getDiagnostics() is pure assembly, no recomputation
-- Quality cache uses a simple boolean flag (`qualityCacheValid`); any mutation sets it false, assess() sets it true after recompute
+- Quality cache uses a simple boolean flag (`qualityCacheValid`); any mutation sets it false, assess() sets it true after recompute. **Known issue:** the inner `QualityReportAssembler` has its own dirty-flag cache that is NOT invalidated by segment mutations (add, evict, compact, replace, split, restore) — only by task/provider changes. This can cause stale reports after mutations. See `TEST_STRATEGY.md` §6 for details and fix.
 - All async methods: setTask (embeds descriptor), setEmbeddingProvider (re-embeds all segments). Everything else is synchronous.
+- Fleet module (`fleet.ts`) defines its own `FleetEventMap` and uses the shared `EventEmitter` class. It is a read-only consumer of `ContextLens` public API — never mutates instances.
+- OTel module (`otel.ts`) defines minimal structural-typing interfaces for `@opentelemetry/api` types, avoiding tight coupling to specific OTel versions. Uses observable gauges (with stored values + callbacks) for compatibility with `^1.0.0`.
+- Schema module (`schemas/`) builds JSON Schema objects programmatically (not from files) using shared `$defs`. The `validate.ts` implements a lightweight JSON Schema draft 2020-12 subset validator with zero dependencies.
 
 ## What's next
 
-**Phase 5 — Enrichments (5 tasks remaining):**
+**Testing coverage uplift.** `TEST_STRATEGY.md` documents the plan:
 
-| Task | Description |
-|------|-------------|
-| 5.1 | Report schema: JSON Schema files (draft 2020-12), toJSON(), validate(), static schemas export |
-| 5.2 | Serialization: snapshot(), fromSnapshot(), format versioning, provider change detection |
-| 5.3 | Fleet monitor: ContextLensFleet class, assessFleet, aggregation, fleet events |
-| 5.4 | OTel export: ContextLensExporter, gauges, counters, histogram, log events |
-| 5.5 | Phase 5 tests: schema conformance, serialization round-trip, fleet/OTel unit tests |
+| Phase | What | Est. new tests |
+|-------|------|------:|
+| A | ContextLens class unit tests (40+ public methods, currently zero unit coverage) | ~80 |
+| B | End-to-end lifecycle tests (full session journeys) | ~15 |
+| C | Branch coverage for internal modules (8 modules with uncovered paths) | ~60 |
+| D | Property-based invariant hardening (8 new invariants) | ~15 |
+| E | Performance regression benchmarks | ~12 |
+
+Target: >95% statement coverage, >90% branch coverage, ~976 total tests.
+
+**Known bug to fix first:** report assembler cache not invalidated on segment mutations. See `TEST_STRATEGY.md` §6.
 
 ## Design review history
 
@@ -296,9 +301,10 @@ Key technology decisions: TypeScript strict mode, tsup for ESM+CJS dual build, v
 
 ## Files to read on pickup
 
-1. `IMPL_JOURNAL.md` — ephemeral build tracker, 33 tasks across 5 phases, current progress
-2. `IMPLEMENTATION.md` — implementation strategy, tech stack, package structure, dependency graph, phase breakdown, Phase 1 inline
-3. `impl/I-02-scoring-engine.md` through `impl/I-05-enrichments.md` — per-phase implementation specs
+1. `IMPL_JOURNAL.md` — ephemeral build tracker, 33/33 tasks complete across 5 phases
+2. `TEST_STRATEGY.md` — testing coverage uplift plan (the active work item)
+3. `IMPLEMENTATION.md` — implementation strategy, tech stack, package structure, dependency graph, phase breakdown, Phase 1 inline
+4. `impl/I-02-scoring-engine.md` through `impl/I-05-enrichments.md` — per-phase implementation specs
 **Archived:** `REVIEW.md` and `REVIEW_FINDINGS.md` exported to `../archive/context-lens-REVIEW.md` and `../archive/context-lens-REVIEW_FINDINGS.md`
 
 4. `specs/01-segment-model.md` — completed Spec 1 (the foundation)
