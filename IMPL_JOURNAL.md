@@ -71,7 +71,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | 5.2 | Serialization: snapshot(), fromSnapshot(), format versioning, provider change detection | `serialization.ts` | done |
 | 5.3 | Fleet monitor: ContextLensFleet class, assessFleet, aggregation, fleet events | `fleet.ts` | done |
 | 5.4 | OTel export: ContextLensExporter, gauges, counters, histogram, log events | `otel.ts` | done |
-| 5.5 | Phase 5 tests: schema conformance, serialization round-trip, fleet/OTel unit tests | `test/unit/*`, `test/integration/*` | |
+| 5.5 | Phase 5 tests: schema conformance, serialization round-trip, fleet/OTel unit tests | `test/unit/*`, `test/integration/*` | done |
 
 ---
 
@@ -85,7 +85,7 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 | 2 | 10 | 10 | — |
 | 3 | 5 | 5 | — |
 | 4 | 5 | 5 | — |
-| 5 | 5 | 4 | — |
+| 5 | 5 | 5 | — |
 
 ---
 
@@ -95,3 +95,4 @@ Ephemeral tracking document for the build. Each task is an atomic unit of work e
 |------|-----------------|-------|
 | 2026-04-06 | 1.1–1.8, 2.1–2.10 | Phase 1+2 complete: foundation + scoring engine (508 tests) |
 | 2026-04-07 | 3.1–3.5, 4.1–4.5 | Phase 3+4 complete: detection, eviction, perf, API, diagnostics, formatters (698 tests) |
+| 2026-04-08 | 5.1–5.5 | Phase 5 complete: schemas, serialization, fleet, OTel, all tests (794 tests) |
