@@ -1,0 +1,893 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QualityReport",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "number"
+    },
+    "reportId": {
+      "type": "string"
+    },
+    "segmentCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "windowScores": {
+      "$ref": "#/$defs/WindowScores"
+    },
+    "rawScores": {
+      "$ref": "#/$defs/WindowScores"
+    },
+    "composite": {
+      "oneOf": [
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "baseline": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/BaselineSnapshot"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "capacity": {
+      "$ref": "#/$defs/CapacityReport"
+    },
+    "tokenizer": {
+      "$ref": "#/$defs/TokenizerMetadata"
+    },
+    "embeddingMode": {
+      "type": "string",
+      "enum": [
+        "embeddings",
+        "trigrams"
+      ]
+    },
+    "segments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SegmentScore"
+      }
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/GroupScore"
+      }
+    },
+    "continuity": {
+      "$ref": "#/$defs/ContinuitySummary"
+    },
+    "trend": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TrendData"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "patterns": {
+      "$ref": "#/$defs/DetectionResult"
+    },
+    "task": {
+      "$ref": "#/$defs/TaskSummary"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "timestamp",
+    "reportId",
+    "segmentCount",
+    "windowScores",
+    "rawScores",
+    "composite",
+    "baseline",
+    "capacity",
+    "tokenizer",
+    "embeddingMode",
+    "segments",
+    "groups",
+    "continuity",
+    "trend",
+    "patterns",
+    "task"
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "TaskSummary": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "unset",
+            "active"
+          ]
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "gracePeriodActive": {
+          "type": "boolean"
+        },
+        "gracePeriodRemaining": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "state",
+        "stale",
+        "gracePeriodActive",
+        "gracePeriodRemaining"
+      ],
+      "additionalProperties": true
+    },
+    "CompoundContext": {
+      "type": "object",
+      "properties": {
+        "compound": {
+          "type": "string",
+          "enum": [
+            "fullOfJunk",
+            "fullOfWrongThings",
+            "scatteredAndIrrelevant",
+            "lossDominates",
+            "pressureLoop",
+            "triplePressure"
+          ]
+        },
+        "coPatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "diagnosis": {
+          "type": "string"
+        },
+        "remediationShift": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "compound",
+        "coPatterns",
+        "diagnosis",
+        "remediationShift"
+      ],
+      "additionalProperties": true
+    },
+    "RemediationHint": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "evict",
+            "compact",
+            "deduplicate",
+            "reorder",
+            "restore",
+            "updateTask",
+            "increaseCapacity",
+            "slowEviction",
+            "restart",
+            "dissolve"
+          ]
+        },
+        "target": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "estimatedImpact": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "estimatedImpact",
+        "description"
+      ],
+      "additionalProperties": true
+    },
+    "ThresholdRef": {
+      "type": "object",
+      "properties": {
+        "severity": {
+          "type": "string",
+          "enum": [
+            "watch",
+            "warning",
+            "critical"
+          ]
+        },
+        "threshold": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "severity",
+        "threshold"
+      ],
+      "additionalProperties": true
+    },
+    "ScoreRef": {
+      "type": "object",
+      "properties": {
+        "dimension": {
+          "type": "string"
+        },
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "dimension",
+        "value"
+      ],
+      "additionalProperties": true
+    },
+    "PatternSignature": {
+      "type": "object",
+      "properties": {
+        "primaryScore": {
+          "$ref": "#/$defs/ScoreRef"
+        },
+        "secondaryScores": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScoreRef"
+          }
+        },
+        "utilization": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "thresholdCrossed": {
+          "$ref": "#/$defs/ThresholdRef"
+        }
+      },
+      "required": [
+        "primaryScore",
+        "secondaryScores",
+        "utilization",
+        "thresholdCrossed"
+      ],
+      "additionalProperties": true
+    },
+    "ActivePattern": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "watch",
+            "warning",
+            "critical"
+          ]
+        },
+        "activatedAt": {
+          "type": "number"
+        },
+        "currentSince": {
+          "type": "number"
+        },
+        "duration": {
+          "type": "number",
+          "minimum": 0
+        },
+        "trending": {
+          "type": "string",
+          "enum": [
+            "worsening",
+            "stable",
+            "improving"
+          ]
+        },
+        "signature": {
+          "$ref": "#/$defs/PatternSignature"
+        },
+        "explanation": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RemediationHint"
+          }
+        },
+        "compoundContext": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CompoundContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "severity",
+        "activatedAt",
+        "currentSince",
+        "duration",
+        "trending",
+        "signature",
+        "explanation",
+        "remediation",
+        "compoundContext"
+      ],
+      "additionalProperties": true
+    },
+    "DetectionResult": {
+      "type": "object",
+      "properties": {
+        "patterns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ActivePattern"
+          }
+        },
+        "patternCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "highestSeverity": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "watch",
+                "warning",
+                "critical"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preBaseline": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "patterns",
+        "patternCount",
+        "highestSeverity",
+        "preBaseline"
+      ],
+      "additionalProperties": true
+    },
+    "TokenizerMetadata": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "accuracy": {
+          "type": "string",
+          "enum": [
+            "exact",
+            "approximate"
+          ]
+        },
+        "modelFamily": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "errorBound": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "accuracy",
+        "modelFamily",
+        "errorBound"
+      ],
+      "additionalProperties": true
+    },
+    "CapacityReport": {
+      "type": "object",
+      "properties": {
+        "capacity": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "totalActiveTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "utilization": {
+          "type": "number",
+          "minimum": 0
+        },
+        "headroom": {
+          "type": "integer"
+        },
+        "pinnedTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "seedTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "managedTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "availableCapacity": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "capacity",
+        "totalActiveTokens",
+        "utilization",
+        "headroom",
+        "pinnedTokens",
+        "seedTokens",
+        "managedTokens",
+        "availableCapacity"
+      ],
+      "additionalProperties": true
+    },
+    "TrendData": {
+      "type": "object",
+      "properties": {
+        "previousReportId": {
+          "type": "string"
+        },
+        "timeDelta": {
+          "type": "number"
+        },
+        "coherenceDelta": {
+          "type": "number"
+        },
+        "densityDelta": {
+          "type": "number"
+        },
+        "relevanceDelta": {
+          "type": "number"
+        },
+        "continuityDelta": {
+          "type": "number"
+        },
+        "compositeDelta": {
+          "type": "number"
+        },
+        "segmentCountDelta": {
+          "type": "integer"
+        },
+        "tokensDelta": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "previousReportId",
+        "timeDelta",
+        "coherenceDelta",
+        "densityDelta",
+        "relevanceDelta",
+        "continuityDelta",
+        "compositeDelta",
+        "segmentCountDelta",
+        "tokensDelta"
+      ],
+      "additionalProperties": true
+    },
+    "ContinuityEvent": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "eviction",
+            "compaction",
+            "restoration"
+          ]
+        },
+        "segmentId": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "number"
+        },
+        "tokensBefore": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokensAfter": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cost": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "fidelity": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "segmentId",
+        "timestamp",
+        "tokensBefore",
+        "tokensAfter",
+        "cost",
+        "fidelity"
+      ],
+      "additionalProperties": true
+    },
+    "ContinuitySummary": {
+      "type": "object",
+      "properties": {
+        "totalEvictions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalCompactions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalRestorations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "netLoss": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "tokensEvicted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokensCompacted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokensRestored": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "recentEvents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContinuityEvent"
+          }
+        }
+      },
+      "required": [
+        "totalEvictions",
+        "totalCompactions",
+        "totalRestorations",
+        "netLoss",
+        "tokensEvicted",
+        "tokensCompacted",
+        "tokensRestored",
+        "recentEvents"
+      ],
+      "additionalProperties": true
+    },
+    "GroupScore": {
+      "type": "object",
+      "properties": {
+        "groupId": {
+          "type": "string"
+        },
+        "memberCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "totalTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "groupCoherence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "meanRelevance": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "meanDensity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "composite": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "integrityWarning": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "groupId",
+        "memberCount",
+        "totalTokens",
+        "groupCoherence",
+        "meanRelevance",
+        "meanDensity",
+        "composite",
+        "integrityWarning"
+      ],
+      "additionalProperties": true
+    },
+    "RedundancyInfo": {
+      "type": "object",
+      "properties": {
+        "maxSimilarity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "mostSimilarSegmentId": {
+          "type": "string"
+        },
+        "sameOrigin": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "maxSimilarity",
+        "mostSimilarSegmentId",
+        "sameOrigin"
+      ],
+      "additionalProperties": true
+    },
+    "SegmentScore": {
+      "type": "object",
+      "properties": {
+        "segmentId": {
+          "type": "string"
+        },
+        "coherence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "density": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "relevance": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "continuity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "composite": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "tokenCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "redundancy": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RedundancyInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "groupId": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "segmentId",
+        "coherence",
+        "density",
+        "relevance",
+        "continuity",
+        "composite",
+        "tokenCount",
+        "redundancy",
+        "groupId"
+      ],
+      "additionalProperties": true
+    },
+    "BaselineSnapshot": {
+      "type": "object",
+      "properties": {
+        "coherence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "density": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "relevance": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "continuity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "capturedAt": {
+          "type": "number"
+        },
+        "segmentCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tokenCount": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "coherence",
+        "density",
+        "relevance",
+        "continuity",
+        "capturedAt",
+        "segmentCount",
+        "tokenCount"
+      ],
+      "additionalProperties": true
+    },
+    "WindowScores": {
+      "type": "object",
+      "properties": {
+        "coherence": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "density": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "relevance": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "continuity": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "coherence",
+        "density",
+        "relevance",
+        "continuity"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

@@ -206,9 +206,60 @@ Key decisions made in Spec 13:
 - Convention-based naming: `context_lens.*` prefix, OTel semantic conventions
 - 6 invariants including read-only consumer, optional dependency, metric naming stability
 
+## Current state
+
+**Implementation and testing complete. Ready for packaging and v0.1.0 publish.**
+
+- 33/33 build tasks done across 5 phases
+- 977 tests passing across 36 test files + 12 performance benchmarks
+- All typechecks clean
+- Report assembler cache bug fixed (was not invalidating on segment mutations)
+- ~10,200 source LOC, ~15,500 test LOC
+
+### What's built
+
+| Phase | Status | Modules |
+|-------|--------|---------|
+| 1 — Foundation | **Complete** | types, errors, events, utils (hash, LRU, ring buffer, copy), segment-store, tokenizer |
+| 2 — Scoring Engine | **Complete** | similarity, embedding, task, coherence/density/relevance/continuity scorers, baseline, composite, quality-report |
+| 3 — Detection & Advisory | **Complete** | detection (5 patterns, hysteresis, compounds, custom registration, fail-open, history), eviction (5-signal ranking, tiers, strategies, compaction), performance (timing, budgets, sampling) |
+| 4 — Public API & Diagnostics | **Complete** | ContextLens class (constructor, 8 segment ops, 4 group ops, task ops, assess, planEviction, provider mgmt, capacity), diagnostics (history, trends, timeline, warnings), formatters (3 pure functions) |
+| 5 — Enrichments | **Complete** | schemas (JSON Schema draft 2020-12, toJSON, validate), serialization (snapshot/fromSnapshot, format versioning, provider change detection), fleet (ContextLensFleet, assessFleet, aggregation, fleet events), OTel (ContextLensExporter, 9 gauges, 6 counters, 1 histogram, 5 log events) |
+
+### Test coverage
+
+| Layer | Files | Tests |
+|-------|------:|------:|
+| Unit | 23 | 758 |
+| Integration | 2 | 21 |
+| End-to-end | 1 | 7 |
+| Property-based | 5 | 60 |
+| Benchmarks | 1 | 12 |
+
+### Key architecture decisions made during implementation
+
+- SegmentStore handles validation, protection checks, atomicity, token counting, and event emission internally — ContextLens is a thin orchestration layer adding embedding prep, continuity tracking, baseline capture, cache invalidation, and defensive copies
+- Detection engine records PatternHistoryEntry events internally; ContextLens reads the history diff after each detect() to fire public pattern events
+- Diagnostics module subscribes to the event emitter at construction and maintains state incrementally — getDiagnostics() is pure assembly, no recomputation
+- Quality cache uses dual invalidation: outer `qualityCacheValid` flag + inner `reportAssembler.invalidate()`, both called on every mutation
+- All async methods: setTask (embeds descriptor), setEmbeddingProvider (re-embeds all segments). Everything else is synchronous
+- Fleet module (`fleet.ts`) defines its own `FleetEventMap` and uses the shared `EventEmitter` class. Read-only consumer of `ContextLens` public API
+- OTel module (`otel.ts`) defines minimal structural-typing interfaces for `@opentelemetry/api` types, avoiding tight coupling to specific OTel versions
+- Schema module (`schemas/`) builds JSON Schema objects programmatically using shared `$defs`. The `validate.ts` implements a lightweight JSON Schema draft 2020-12 subset validator with zero dependencies
+
+### Known issues
+
+| Issue | Severity | Notes |
+|-------|----------|-------|
+| Baseline not wired | Low | `BaselineManager.notifyAdd()` never called from `captureBaseline()`. Scores work correctly without it (raw scores used). Fix before v0.1.0. |
+| assess@500 over budget | Low | O(n^2) similarity at 500 segments takes ~300ms vs 50ms budget. Sampling mitigates in practice. |
+| No dispose method | Info | Event handlers and caches persist until GC. Plan for v0.2.0. |
+
 ## What's next
 
-**Design spec review COMPLETE. Implementation specs COMPLETE. Ready for coding specs and code.**
+**Shipping.** See `SHIPPING.md` for the full pre-publish checklist, known issues, and release plan (v0.1.0 through v0.3.0).
+
+## Design review history
 
 ### Review progress
 
@@ -262,24 +313,10 @@ Key technology decisions: TypeScript strict mode, tsup for ESM+CJS dual build, v
 
 ## Files to read on pickup
 
-1. `IMPL_JOURNAL.md` — ephemeral build tracker, 33 tasks across 5 phases, current progress
-2. `IMPLEMENTATION.md` — implementation strategy, tech stack, package structure, dependency graph, phase breakdown, Phase 1 inline
+1. `SHIPPING.md` — pre-publish checklist, known issues, release plan (v0.1.0–v0.3.0)
+2. `IMPLEMENTATION.md` — implementation strategy, tech stack, package structure, dependency graph, Phase 1 inline
 3. `impl/I-02-scoring-engine.md` through `impl/I-05-enrichments.md` — per-phase implementation specs
-**Archived:** `REVIEW.md` and `REVIEW_FINDINGS.md` exported to `../archive/context-lens-REVIEW.md` and `../archive/context-lens-REVIEW_FINDINGS.md`
+4. `specs/01-segment-model.md` through `specs/14-serialization.md` — 14 design specs (authoritative behavioral reference)
 
-4. `specs/01-segment-model.md` — completed Spec 1 (the foundation)
-5. `specs/06-tokenization-strategy.md` — completed Spec 6 (token counting, provider abstraction, caching)
-4. `specs/02-quality-model.md` — completed Spec 2 (four quality dimensions, scoring mechanics, baseline, reports)
-5. `specs/03-degradation-patterns.md` — completed Spec 3, amended (five degradation patterns, detection framework, pattern interactions, custom pattern registration §10)
-6. `specs/04-task-identity.md` — completed Spec 4 (task descriptor model, lifecycle, transitions, preparation, integration, invariants)
-7. `specs/05-embedding-strategy.md` — completed Spec 5 (embedding provider abstraction, caching, fallback)
-8. `specs/07-api-surface.md` — draft Spec 7, amended (public API, constructor, all operations, events, errors, registerPattern, snapshot/fromSnapshot, toJSON/schemas/validate)
-9. `specs/08-eviction-advisory.md` — draft Spec 8, amended (eviction ranking, strategies, group handling, custom pattern strategyHint)
-10. `specs/09-performance-budget.md` — draft Spec 9 (budget tiers, complexity analysis, sampling strategies, memory budget, provider separation, measurement)
-11. `specs/10-report-diagnostics.md` — draft Spec 10, amended (diagnostic snapshot, report history, pattern history, session timeline, custom pattern accommodation §4.4, JSON formatting §8.4)
-12. `specs/11-report-schema.md` — draft Spec 11 (JSON Schema for all output types, schema versioning, serialization conventions, validation)
-13. `specs/12-fleet-monitor.md` — draft Spec 12 (multi-instance fleet monitoring, fleet assessment, aggregation, fleet events)
-14. `specs/13-observability-export.md` — draft Spec 13 (OpenTelemetry adapter, metrics, events, integration patterns)
-15. `specs/14-serialization.md` — draft Spec 14 (state snapshots, restore, lightweight export, format versioning)
-16. `../mada-journal/sessions/mada/brainstorm_20260324_context-lens.md` — origin brainstorm (read if you need deeper context on API shape or embedding strategy)
-17. `../mada-journal/sessions/mada/brainstorm_20260404_context-lens-protocol-elevation.md` — enrichment brainstorm (sections 12–14 contain the integration strategy for specs 011–014 and all amendments)
+**Archived:** `REVIEW.md` and `REVIEW_FINDINGS.md` exported to `../archive/context-lens-REVIEW.md` and `../archive/context-lens-REVIEW_FINDINGS.md`
+**Removed:** `IMPL_JOURNAL.md` (build tracker, superseded — all 33 tasks done) and `TEST_STRATEGY.md` (testing uplift plan, superseded — all 5 phases complete)

@@ -1,0 +1,349 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EvictionPlan",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "type": "string"
+    },
+    "planId": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "number"
+    },
+    "strategy": {
+      "type": "string",
+      "enum": [
+        "default",
+        "saturation",
+        "erosion",
+        "gap",
+        "collapse"
+      ]
+    },
+    "target": {
+      "$ref": "#/$defs/PlanTarget"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/EvictionCandidate"
+      }
+    },
+    "candidateCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "totalReclaimable": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "targetMet": {
+      "type": "boolean"
+    },
+    "shortfall": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "seedsIncluded": {
+      "type": "boolean"
+    },
+    "exhausted": {
+      "type": "boolean"
+    },
+    "qualityImpact": {
+      "$ref": "#/$defs/ProjectedQualityImpact"
+    },
+    "patterns": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "reportId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "planId",
+    "timestamp",
+    "strategy",
+    "target",
+    "candidates",
+    "candidateCount",
+    "totalReclaimable",
+    "targetMet",
+    "shortfall",
+    "seedsIncluded",
+    "exhausted",
+    "qualityImpact",
+    "patterns",
+    "reportId"
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "CompactionRecommendation": {
+      "type": "object",
+      "properties": {
+        "segmentId": {
+          "type": "string"
+        },
+        "currentTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "estimatedTargetTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "estimatedSavings": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "compressionRatio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "continuityCost": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "segmentId",
+        "currentTokens",
+        "estimatedTargetTokens",
+        "estimatedSavings",
+        "compressionRatio",
+        "continuityCost",
+        "reason"
+      ],
+      "additionalProperties": true
+    },
+    "ProjectedQualityImpact": {
+      "type": "object",
+      "properties": {
+        "coherence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "density": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "relevance": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "continuity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "composite": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "coherence",
+        "density",
+        "relevance",
+        "continuity",
+        "composite"
+      ],
+      "additionalProperties": true
+    },
+    "CandidateImpact": {
+      "type": "object",
+      "properties": {
+        "coherenceDelta": {
+          "type": "number"
+        },
+        "densityDelta": {
+          "type": "number"
+        },
+        "relevanceDelta": {
+          "type": "number"
+        },
+        "continuityDelta": {
+          "type": "number"
+        },
+        "compositeDelta": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "coherenceDelta",
+        "densityDelta",
+        "relevanceDelta",
+        "continuityDelta",
+        "compositeDelta"
+      ],
+      "additionalProperties": true
+    },
+    "CandidateScores": {
+      "type": "object",
+      "properties": {
+        "relevance": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "density": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "coherenceContribution": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "redundancy": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "relevance",
+        "density",
+        "coherenceContribution",
+        "redundancy"
+      ],
+      "additionalProperties": true
+    },
+    "EvictionCandidate": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "segment",
+            "group"
+          ]
+        },
+        "tokenCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cumulativeTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "evictionScore": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "tier": {
+          "type": "string"
+        },
+        "importance": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "scores": {
+          "$ref": "#/$defs/CandidateScores"
+        },
+        "impact": {
+          "$ref": "#/$defs/CandidateImpact"
+        },
+        "recommendation": {
+          "type": "string",
+          "enum": [
+            "evict",
+            "compact"
+          ]
+        },
+        "compaction": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CompactionRecommendation"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CompactionRecommendation"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memberIds": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "tokenCount",
+        "cumulativeTokens",
+        "evictionScore",
+        "tier",
+        "importance",
+        "scores",
+        "impact",
+        "recommendation",
+        "compaction",
+        "memberIds",
+        "reason"
+      ],
+      "additionalProperties": true
+    },
+    "PlanTarget": {
+      "type": "object",
+      "properties": {
+        "tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "utilizationBefore": {
+          "type": "number",
+          "minimum": 0
+        },
+        "utilizationAfter": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "tokens",
+        "utilizationBefore",
+        "utilizationAfter"
+      ],
+      "additionalProperties": true
+    }
+  }
+}
