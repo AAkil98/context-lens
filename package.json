@@ -1,5 +1,5 @@
 {
-  "name": "context-lens",
+  "name": "@madahub-dev/context-lens",
   "version": "0.1.0",
   "description": "Context window quality monitoring for LLM applications",
   "type": "module",
