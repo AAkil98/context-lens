@@ -98,6 +98,12 @@ export class ContextLens {
   private seeded = false;
   private hasAdds = false;
 
+  /**
+   * Create a new ContextLens instance for monitoring a single context window.
+   * @param config - Configuration with required `capacity` (token budget) and optional providers.
+   * @throws {ConfigurationError} If capacity is missing or invalid.
+   * @see cl-spec-007 §4
+   */
   constructor(config: ContextLensConfig) {
     // Step 1: Validate config
     this.validateConfig(config);
@@ -217,7 +223,12 @@ export class ContextLens {
 
   // ── Segment Operations ──────────────────────────────────────────
 
-  /** Batch insert seed segments. Protection defaults to 'seed'. */
+  /**
+   * Batch insert seed segments. Protection defaults to 'seed'.
+   * Triggers baseline capture on the next `add()` call.
+   * @throws {ValidationError} If any segment has empty content or duplicate content hash.
+   * @see cl-spec-007 §5.1
+   */
   seed(segments: SeedInput[]): Segment[] {
     if (segments.length === 0) return [];
 
@@ -265,7 +276,11 @@ export class ContextLens {
     return results;
   }
 
-  /** Add a single segment. Returns Segment on success, DuplicateSignal on auto-ID collision. */
+  /**
+   * Add a single segment. Returns a {@link DuplicateSignal} instead of throwing on auto-ID collision.
+   * On the first add after seed, captures the quality baseline.
+   * @see cl-spec-007 §5.1
+   */
   add(content: string, options?: AddOptions): Segment | DuplicateSignal {
     const opts = options !== undefined ? deepCopy(options) : undefined;
 
@@ -291,7 +306,11 @@ export class ContextLens {
     return deepCopy(result);
   }
 
-  /** Update segment metadata and/or content in place. */
+  /**
+   * Update segment metadata and/or content in place.
+   * @throws {SegmentNotFoundError} If the segment does not exist.
+   * @see cl-spec-007 §5.1
+   */
   update(id: string, changes: UpdateChanges): Segment {
     const changesCopy = deepCopy(changes);
     const result = this.store.update(id, changesCopy);
@@ -308,7 +327,11 @@ export class ContextLens {
     return deepCopy(result);
   }
 
-  /** Replace segment content entirely. */
+  /**
+   * Replace segment content entirely, preserving the segment ID.
+   * @throws {SegmentNotFoundError} If the segment does not exist.
+   * @see cl-spec-007 §5.1
+   */
   replace(id: string, newContent: string, options?: Partial<Pick<AddOptions, 'importance' | 'origin' | 'tags'>>): Segment {
     const opts = options !== undefined ? deepCopy(options) : undefined;
     const result = this.store.replace(id, newContent, opts);
@@ -323,7 +346,12 @@ export class ContextLens {
     return deepCopy(result);
   }
 
-  /** Compact segment by replacing with shorter summary. */
+  /**
+   * Compact a segment by replacing its content with a caller-provided summary.
+   * Records a compaction event in the continuity ledger.
+   * @throws {CompactionError} If the summary is longer than the original.
+   * @see cl-spec-007 §5.1
+   */
   compact(id: string, summary: string): Segment {
     const seg = this.store.getSegment(id);
     const prevTokenCount = seg?.tokenCount ?? 0;
@@ -351,7 +379,12 @@ export class ContextLens {
     return deepCopy(result);
   }
 
-  /** Split a segment into multiple children via user-provided function. */
+  /**
+   * Split a segment into multiple children via a caller-provided function.
+   * The original segment is removed; children inherit its protection and group.
+   * @throws {SplitError} If splitFn returns fewer than 2 parts or empty parts.
+   * @see cl-spec-007 §5.1
+   */
   split(id: string, splitFn: (content: string) => string[]): Segment[] {
     const results = this.store.split(id, splitFn);
 
@@ -366,7 +399,14 @@ export class ContextLens {
     return results.map(s => deepCopy(s));
   }
 
-  /** Evict a segment (or entire group if grouped). */
+  /**
+   * Evict a segment (or its entire group atomically if grouped).
+   * Records eviction cost in the continuity ledger.
+   * @returns Single record for ungrouped, array for group eviction.
+   * @throws {SegmentNotFoundError} If the segment does not exist.
+   * @throws {ProtectionError} If the segment is pinned.
+   * @see cl-spec-007 §5.1
+   */
   evict(id: string, reason?: string): EvictionRecord | EvictionRecord[] {
     const records = this.store.evict(id, reason);
 
@@ -389,7 +429,12 @@ export class ContextLens {
     return copied.length === 1 ? copied[0]! : copied;
   }
 
-  /** Restore an evicted segment (or entire group). */
+  /**
+   * Restore an evicted segment (or its entire group).
+   * Records restoration fidelity in the continuity ledger.
+   * @throws {RestoreError} If the segment is not evicted or content was not retained.
+   * @see cl-spec-007 §5.1
+   */
   restore(id: string, options?: RestoreOptions): Segment | Segment[] {
     const opts = options !== undefined ? deepCopy(options) : undefined;
     const results = this.store.restore(id, opts);
@@ -416,14 +461,22 @@ export class ContextLens {
 
   // ── Group Operations ────────────────────────────────────────────
 
-  /** Create a group from existing active segments. */
+  /**
+   * Create a group from existing active segments. Groups evict and restore atomically.
+   * @throws {DuplicateIdError} If the groupId is already in use.
+   * @see cl-spec-007 §5.2
+   */
   createGroup(groupId: string, segmentIds: string[], options?: CreateGroupOptions): Group {
     const opts = options !== undefined ? deepCopy(options) : undefined;
     const result = this.store.createGroup(groupId, segmentIds, opts);
     return deepCopy(result);
   }
 
-  /** Dissolve a group, keeping members as individual segments. */
+  /**
+   * Dissolve a group, keeping members as individual segments.
+   * @throws {ValidationError} If the group does not exist.
+   * @see cl-spec-007 §5.2
+   */
   dissolveGroup(groupId: string): Segment[] {
     const group = this.store.getGroup(groupId);
     if (group === undefined) {
@@ -468,7 +521,10 @@ export class ContextLens {
     return deepCopy(this.computeCapacity());
   }
 
-  /** Subscribe to an event. Returns unsubscribe function. */
+  /**
+   * Subscribe to an event. Returns an unsubscribe function.
+   * @see cl-spec-007 §9
+   */
   on<E extends keyof ContextLensEventMap>(
     event: E,
     handler: (payload: ContextLensEventMap[E]) => void,
@@ -478,7 +534,13 @@ export class ContextLens {
 
   // ── Assessment ──────────────────────────────────────────────────
 
-  /** Assess context window quality. Returns cached report if no mutations since last call. */
+  /**
+   * Assess context window quality. Returns a cached report if no mutations since the last call.
+   * Runs all four dimension scorers, detection, and trend analysis.
+   * @see cl-spec-007 §6
+   * @see cl-spec-002 (quality model)
+   * @see cl-spec-003 (degradation patterns)
+   */
   assess(): QualityReport {
     // Step 1: Check cache
     if (this.qualityCacheValid && this.cachedReport !== null) {
@@ -535,7 +597,11 @@ export class ContextLens {
 
   // ── Eviction Planning ───────────────────────────────────────────
 
-  /** Generate an advisory eviction plan. */
+  /**
+   * Generate an advisory eviction plan. Calls {@link assess} if no cached report exists.
+   * Plans are snapshots — the caller must re-plan after executing mutations.
+   * @see cl-spec-008
+   */
   planEviction(options?: PlanOptions): EvictionPlan {
     // Ensure a report exists
     if (this.cachedReport === null) {
@@ -553,7 +619,12 @@ export class ContextLens {
 
   // ── Task Operations ─────────────────────────────────────────────
 
-  /** Set or update the task descriptor. */
+  /**
+   * Set or update the task descriptor. Classifies the transition as 'new', 'refinement',
+   * 'change', or 'same'. Invalidates relevance scores on non-same transitions.
+   * @returns Transition details including classification and similarity.
+   * @see cl-spec-004
+   */
   async setTask(descriptor: TaskDescriptor): Promise<TaskTransition> {
     const desc = deepCopy(descriptor);
     const transition = await this.taskManager.setTask(desc, this.similarity, this.embedding);
@@ -592,7 +663,10 @@ export class ContextLens {
 
   // ── Provider Management ─────────────────────────────────────────
 
-  /** Change the tokenizer provider. Recounts all segments. */
+  /**
+   * Switch the tokenizer provider. Triggers a full recount of all active segments.
+   * @see cl-spec-006
+   */
   setTokenizer(provider: TokenizerProvider | 'approximate', metadata?: TokenizerMetadata): void {
     const result = this.tokenizer.switchProvider(provider, metadata, {
       getActiveSegments: () => this.store.getActiveSegmentIterator(),
@@ -606,7 +680,11 @@ export class ContextLens {
     this.emitter.emit('tokenizerChanged', result);
   }
 
-  /** Change or remove the embedding provider. */
+  /**
+   * Switch or remove the embedding provider. Triggers a full re-embed of all segments
+   * and invalidates the similarity cache. Pass `null` to downgrade to trigram mode.
+   * @see cl-spec-005
+   */
   async setEmbeddingProvider(
     provider: EmbeddingProvider | null,
     metadata?: EmbeddingProviderMetadata,
@@ -659,7 +737,12 @@ export class ContextLens {
 
   // ── Pattern Registration ────────────────────────────────────────
 
-  /** Register a custom detection pattern. */
+  /**
+   * Register a custom detection pattern at runtime. Custom patterns receive the full
+   * {@link QualityReport} and participate in hysteresis like built-in patterns.
+   * @throws {DuplicateIdError} If a pattern with the same name is already registered.
+   * @see cl-spec-003 §10
+   */
   registerPattern(definition: PatternDefinition): void {
     const def = deepCopy(definition);
     this.detection.registerPattern(def);
@@ -674,7 +757,11 @@ export class ContextLens {
     return snap !== null ? deepCopy(snap) : null;
   }
 
-  /** Get full diagnostic snapshot. Tier 1 (< 1ms) — reads pre-maintained state. */
+  /**
+   * Get full diagnostic snapshot. Tier 1 (< 1ms) — assembles pre-maintained state
+   * including report history, pattern stats, timeline, cache metrics, and warnings.
+   * @see cl-spec-010
+   */
   getDiagnostics(): DiagnosticSnapshot {
     return this.diagnosticsManager.getDiagnostics();
   }

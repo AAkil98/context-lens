@@ -75,6 +75,11 @@ export class ContextLensFleet {
   /** Whether fleet is currently in degraded state */
   private fleetDegradedState = false;
 
+  /**
+   * Create a fleet monitor for aggregating quality across multiple ContextLens instances.
+   * @param options.degradationThreshold - Ratio of degraded instances that triggers a fleet-level alert (default 0.5).
+   * @see cl-spec-012
+   */
   constructor(options?: { degradationThreshold?: number }) {
     this.degradationThreshold = options?.degradationThreshold ?? DEFAULT_DEGRADATION_THRESHOLD;
 
@@ -87,7 +92,11 @@ export class ContextLensFleet {
 
   // ── Registration ─────────────────────────────────────────────
 
-  /** Register a ContextLens instance under a unique label. */
+  /**
+   * Register a ContextLens instance under a unique label.
+   * @throws {DuplicateIdError} If the label is already registered.
+   * @see cl-spec-012 §3
+   */
   register(instance: ContextLens, label: string): void {
     if (!label || label.length === 0) {
       throw new ValidationError('Label must be non-empty');
@@ -156,7 +165,13 @@ export class ContextLensFleet {
 
   // ── Assessment ───────────────────────────────────────────────
 
-  /** Assess all fleet instances and produce a fleet report. */
+  /**
+   * Assess all fleet instances and produce a fleet-wide report with aggregates,
+   * hotspots, ranking, and capacity overview. Fail-open: one failing instance
+   * does not break the fleet assessment.
+   * @param options.cached - If true, reuse each instance's cached report instead of re-assessing.
+   * @see cl-spec-012 §4
+   */
   assessFleet(options?: { cached?: boolean }): FleetReport {
     const cached = options?.cached ?? false;
     const now = Date.now();
@@ -205,7 +220,11 @@ export class ContextLensFleet {
     };
   }
 
-  /** Assess a single instance without full fleet cost. */
+  /**
+   * Assess a single registered instance without full fleet assessment cost.
+   * @throws {ValidationError} If the label is not registered.
+   * @see cl-spec-012 §4
+   */
   assessInstance(label: string, options?: { cached?: boolean }): InstanceReport {
     const state = this.instances.get(label);
     if (state === undefined) {

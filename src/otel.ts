@@ -121,6 +121,13 @@ export class ContextLensExporter {
   // Histogram
   private readonly assessDuration: OTelHistogram;
 
+  /**
+   * Create an OTel exporter that subscribes to a ContextLens instance's events
+   * and translates quality signals into OTel metrics and log events.
+   * @param instance - The ContextLens instance to observe (read-only).
+   * @param options - OTel providers, label, and optional metric prefix.
+   * @see cl-spec-013
+   */
   constructor(instance: ContextLens, options: ExporterOptions) {
     this.instance = instance;
     this.prefix = options.metricPrefix ?? 'context_lens';
@@ -174,7 +181,11 @@ export class ContextLensExporter {
     this.subscribeAll();
   }
 
-  /** Stop metric updates and unsubscribe from all events. Idempotent. */
+  /**
+   * Stop metric updates, remove gauge callbacks, and unsubscribe from all instance events.
+   * Idempotent — safe to call multiple times.
+   * @see cl-spec-013 §5
+   */
   disconnect(): void {
     if (this.disconnected) return;
     this.disconnected = true;
