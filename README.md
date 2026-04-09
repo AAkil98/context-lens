@@ -74,6 +74,35 @@ npm install context-lens
 - Zero runtime dependencies for core
 - `@opentelemetry/api` peer dependency for `context-lens/otel` only
 
+## API overview
+
+### `ContextLens` (main class)
+
+| Category | Methods |
+|----------|---------|
+| Segments | `seed`, `add`, `update`, `replace`, `compact`, `split`, `evict`, `restore` |
+| Groups | `createGroup`, `dissolveGroup`, `getGroup`, `listGroups` |
+| Assessment | `assess` → `QualityReport`, `planEviction` → `EvictionPlan` |
+| Task | `setTask`, `clearTask`, `getTask`, `getTaskState` |
+| Providers | `setTokenizer`, `setEmbeddingProvider`, `getTokenizerInfo`, `getEmbeddingProviderInfo` |
+| Inspection | `getCapacity`, `getSegment`, `listSegments`, `getSegmentCount`, `getBaseline`, `getDiagnostics` |
+| Patterns | `registerPattern` (custom degradation patterns) |
+| Events | `on(event, handler)` → unsubscribe function (22 event types) |
+| Serialization | `snapshot`, `ContextLens.fromSnapshot` |
+
+### `ContextLensFleet` (`context-lens/fleet`)
+
+Register multiple `ContextLens` instances and get fleet-wide aggregates, degradation hotspots, comparative ranking, and fleet capacity overview.
+
+### `ContextLensExporter` (`context-lens/otel`)
+
+Read-only OTel adapter: 9 gauges, 6 counters, 1 histogram, and 5 log event types. Subscribes to instance events — no polling.
+
+### Error classes
+
+All 13 error classes are exported from the main entry point for `instanceof` checks:
+`ContextLensError`, `ConfigurationError`, `ValidationError`, `SegmentNotFoundError`, `GroupNotFoundError`, `DuplicateIdError`, `InvalidStateError`, `ProtectionError`, `MembershipError`, `CompactionError`, `SplitError`, `RestoreError`, `ProviderError`.
+
 ## Test suite
 
 977 tests across 36 files + 12 performance benchmarks.
@@ -86,12 +115,11 @@ npm run typecheck   # tsc --noEmit
 
 | Layer | Files | Tests |
 |-------|------:|------:|
-| Unit | 23 | 758 |
+| Unit | 28 | 887 |
 | Integration | 2 | 21 |
 | End-to-end | 1 | 7 |
-| Property-based | 5 | 60 |
-| Benchmarks | 1 | 12 |
-| **Total** | **37** | **989** |
+| Property-based | 5 | 62 |
+| **Total** | **36** | **977** |
 
 ## Architecture
 
@@ -111,4 +139,4 @@ One instance, one window. Caller-driven mutations — context-lens never auto-ev
 
 ## License
 
-Apache 2.0
+MIT
