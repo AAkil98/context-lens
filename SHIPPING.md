@@ -12,45 +12,45 @@ The library is functionally complete and tested. This document covers what remai
 
 ### 1. Build verification
 
-- [ ] `npm run build` produces clean ESM + CJS output
-- [ ] All four sub-path exports resolve correctly: `context-lens`, `context-lens/fleet`, `context-lens/schemas`, `context-lens/otel`
-- [ ] `package.json` `exports` field validated against published tarball structure
-- [ ] `.d.ts` type declarations present for all entry points
-- [ ] `npm pack --dry-run` lists only intended files (no specs, impl docs, test files)
+- [x] `npm run build` produces clean ESM + CJS output
+- [x] All four sub-path exports resolve correctly: `context-lens`, `context-lens/fleet`, `context-lens/schemas`, `context-lens/otel`
+- [x] `package.json` `exports` field validated against published tarball structure
+- [x] `.d.ts` type declarations present for all entry points
+- [x] `npm pack --dry-run` lists only intended files (no specs, impl docs, test files)
 
 ### 2. Package hygiene
 
-- [ ] Add `.npmignore` or `files` field in package.json to exclude: `specs/`, `impl/`, `test/`, `*.md` (except README), `tsconfig.json`, `vitest.config.ts`
-- [ ] Verify `"type": "module"` works in both ESM and CJS consumer projects
-- [ ] `peerDependencies` for `@opentelemetry/api` set with correct version range (`^1.0.0`)
-- [ ] `engines` field in package.json (Node >= 18)
-- [ ] `license` field matches LICENSE file
+- [x] Add `.npmignore` or `files` field in package.json to exclude: `specs/`, `impl/`, `test/`, `*.md` (except README), `tsconfig.json`, `vitest.config.ts`
+- [x] Verify `"type": "module"` works in both ESM and CJS consumer projects
+- [x] `peerDependencies` for `@opentelemetry/api` set with correct version range (`^1.0.0`)
+- [x] `engines` field in package.json (Node >= 18)
+- [x] `license` field matches LICENSE file
 
 ### 3. API surface audit
 
-- [ ] All public exports from `src/index.ts` are intentional — no leaked internals
-- [ ] Methods prefixed with `_` (e.g., `_restoreFromSnapshot`) are not exported
-- [ ] `ContextLensConfig`, `SeedInput`, `RestoreConfig` types exported
-- [ ] All 36 shared types from `types.ts` exported
-- [ ] Error classes exported from main entry point
+- [x] All public exports from `src/index.ts` are intentional — no leaked internals
+- [x] Methods prefixed with `_` (e.g., `_restoreFromSnapshot`) are not exported (class inaccessible at runtime; type-only artifact of DTS bundling)
+- [x] `ContextLensConfig`, `SeedInput`, `RestoreConfig` types exported
+- [x] All shared types from `types.ts` exported via `export type *`
+- [x] Error classes exported from main entry point (13 classes)
 
 ### 4. Documentation
 
-- [ ] README has install, quick start, API overview, and architecture summary
-- [ ] JSDoc on all public methods of `ContextLens`, `ContextLensFleet`, `ContextLensExporter`
-- [ ] `@see` references to design specs in JSDoc
-- [ ] CHANGELOG.md for v0.1.0 (initial release)
+- [x] README has install, quick start, API overview, and architecture summary
+- [x] JSDoc on all public methods of `ContextLens`, `ContextLensFleet`, `ContextLensExporter`
+- [x] `@see` references to design specs in JSDoc
+- [x] CHANGELOG.md for v0.1.0 (initial release)
 
 ### 5. Known issues to resolve before v0.1.0
 
 | Issue | Severity | Description |
 |-------|----------|-------------|
-| Baseline not wired | Low | `BaselineManager.notifyAdd()` never called from `ContextLens.captureBaseline()`. Baseline is never established through normal seed+add flow. Scores work correctly without it (raw scores used when baseline is null). Fix: call `baseline.notifyAdd(rawScores, ...)` inside `captureBaseline()` after the report is built. |
+| ~~Baseline not wired~~ | ~~Low~~ | **Fixed.** `captureBaseline()` now calls `baseline.notifyAdd()` with raw scores, then re-assesses with baseline established. |
 | assess@500 over budget | Low | O(n^2) similarity at 500 segments takes ~300ms vs 50ms budget. Sampling mitigates this in practice but the raw path exceeds spec. Consider tighter sampling or lazy similarity computation. |
 | No dispose/cleanup | Info | No `dispose()` method on ContextLens. Event handlers and caches persist until GC. Fleet doesn't auto-unregister on instance disposal. Add `dispose()` in v0.2.0. |
 | OTel exporter not re-attached on restore | Info | `fromSnapshot()` creates a new instance but doesn't re-attach OTel exporters. Caller must create a new exporter for the restored instance. Document this. |
 
-### 6. Testing gaps to consider
+### 6. Testing gaps to consider (post v0.1.0)
 
 - [ ] Browser/edge runtime compatibility (currently Node-only testing)
 - [ ] Memory profiling under sustained load (1000+ segments over time)
