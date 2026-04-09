@@ -1036,7 +1036,35 @@ export interface RestoreConfig {
   customPatterns?: PatternDefinition[];
 }
 
-// ─── Schema re-exports ───────────────────────────────────────────
+// ─── Re-exports ─────────────────────────────────────────────────
 
+// All shared types — consumers need these to type method params and return values
+export type * from './types.js';
+
+// Error classes — consumers need these for instanceof checks
+export {
+  ContextLensError,
+  ConfigurationError,
+  ValidationError,
+  SegmentNotFoundError,
+  GroupNotFoundError,
+  DuplicateIdError,
+  InvalidStateError,
+  ProtectionError,
+  MembershipError,
+  CompactionError,
+  SplitError,
+  RestoreError,
+  ProviderError,
+} from './errors.js';
+
+// Event map type — consumers need this for typed event handlers
+export type { ContextLensEventMap } from './events.js';
+
+// Types from internal modules used in public method signatures
+export type { AddOptions, UpdateChanges, RestoreOptions, CreateGroupOptions, DuplicateSignal } from './segment-store.js';
+export type { PlanOptions } from './eviction.js';
+
+// Schema utilities
 export { schemas, toJSON, validate, SCHEMA_VERSION } from './schemas/index.js';
-export type { ValidationResult, ValidationError } from './schemas/index.js';
+export type { ValidationResult, ValidationError as SchemaValidationError } from './schemas/index.js';
