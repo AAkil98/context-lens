@@ -22,7 +22,7 @@ context-lens measures what token counting can't.
 ## Quick start
 
 ```typescript
-import { ContextLens } from '@madahub-dev/context-lens';
+import { ContextLens } from '@madahub/context-lens';
 
 const lens = new ContextLens({ capacity: 8000 });
 
@@ -55,17 +55,17 @@ for (const candidate of plan.candidates) {
 ## Installation
 
 ```bash
-npm install @madahub-dev/context-lens
+npm install @madahub/context-lens
 ```
 
 ## Sub-path exports
 
 | Export | What | Dependencies |
 |--------|------|--------------|
-| `@madahub-dev/context-lens` | Core library | None |
-| `@madahub-dev/context-lens/fleet` | Multi-instance fleet monitoring | None |
-| `@madahub-dev/context-lens/schemas` | JSON Schema definitions + validation | None |
-| `@madahub-dev/context-lens/otel` | OpenTelemetry metrics/events adapter | `@opentelemetry/api` (peer) |
+| `@madahub/context-lens` | Core library | None |
+| `@madahub/context-lens/fleet` | Multi-instance fleet monitoring | None |
+| `@madahub/context-lens/schemas` | JSON Schema definitions + validation | None |
+| `@madahub/context-lens/otel` | OpenTelemetry metrics/events adapter | `@opentelemetry/api` (peer) |
 
 ## Tech stack
 
