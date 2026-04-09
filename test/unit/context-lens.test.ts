@@ -826,12 +826,16 @@ describe('ContextLens — Inspection and Diagnostics', () => {
     expect(lens.getBaseline()).toBeNull();
   });
 
-  it('getBaseline() is null after seed + add (notifyAdd not wired)', () => {
-    // BaselineManager.notifyAdd() is never called from ContextLens,
-    // so baseline is not established via normal seed + add flow.
+  it('getBaseline() is established after seed + add', () => {
     seedAndAdd(lens);
     const baseline = lens.getBaseline();
-    expect(baseline).toBeNull();
+    expect(baseline).not.toBeNull();
+    expect(baseline!.coherence).toBeGreaterThanOrEqual(0);
+    expect(baseline!.density).toBeGreaterThanOrEqual(0);
+    expect(baseline!.relevance).toBeGreaterThanOrEqual(0);
+    expect(baseline!.continuity).toBe(1.0);
+    expect(baseline!.segmentCount).toBeGreaterThan(0);
+    expect(baseline!.tokenCount).toBeGreaterThan(0);
   });
 
   it('getDiagnostics() returns DiagnosticSnapshot', () => {
@@ -1112,14 +1116,12 @@ describe('ContextLens — Event System', () => {
     expect(events).toContain('evd-g');
   });
 
-  it('baselineCaptured does not fire (notifyAdd not wired in captureBaseline)', () => {
-    // BaselineManager.notifyAdd() is never called, so baseline is never
-    // established, and captureBaseline() sees report.baseline === null.
+  it('baselineCaptured fires on first add after seed', () => {
     const events: unknown[] = [];
     lens.on('baselineCaptured', (p) => events.push(p));
     lens.seed([{ content: content(0) }, { content: content(1) }]);
     lens.add(content(2));
-    expect(events).toHaveLength(0);
+    expect(events).toHaveLength(1);
   });
 });
 

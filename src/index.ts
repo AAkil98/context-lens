@@ -746,8 +746,19 @@ export class ContextLens {
     const segments = this.store.getOrderedActiveSegments();
     if (segments.length === 0) return;
 
+    // Assess to get raw scores, then wire up baseline
     const ctx = this.buildAssessmentContext();
-    const report = this.reportAssembler.assess(ctx);
+    const preReport = this.reportAssembler.assess(ctx);
+    this.baseline.notifyAdd(
+      preReport.rawScores,
+      preReport.segmentCount,
+      ctx.capacity.totalActiveTokens,
+      preReport.timestamp,
+    );
+
+    // Re-assess with baseline established so the report includes normalized scores
+    this.reportAssembler.invalidate();
+    const report = this.reportAssembler.assess(this.buildAssessmentContext());
     if (report.baseline !== null) {
       this.emitter.emit('baselineCaptured', { baseline: deepCopy(report.baseline) });
     }
