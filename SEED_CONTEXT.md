@@ -120,6 +120,8 @@ Key decisions made in Spec 7:
 
 Amendment complete: `snapshot()`/`fromSnapshot()` added after cl-spec-014 (Serialization) was drafted. 22 events total (19 original + customPatternRegistered + stateSnapshotted + stateRestored).
 
+Further amendment during implementation: `reportGenerated` and `budgetViolation` added. 24 events total.
+
 **Spec 8 (Eviction Advisory) is draft (amended):** `specs/08-eviction-advisory.md`
 
 Key decisions made in Spec 8:

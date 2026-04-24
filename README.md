@@ -87,7 +87,7 @@ npm install @madahub/context-lens
 | Providers | `setTokenizer`, `setEmbeddingProvider`, `getTokenizerInfo`, `getEmbeddingProviderInfo` |
 | Inspection | `getCapacity`, `getSegment`, `listSegments`, `getSegmentCount`, `getBaseline`, `getDiagnostics` |
 | Patterns | `registerPattern` (custom degradation patterns) |
-| Events | `on(event, handler)` → unsubscribe function (22 event types) |
+| Events | `on(event, handler)` → unsubscribe function (24 event types) |
 | Serialization | `snapshot`, `ContextLens.fromSnapshot` |
 
 ### `ContextLensFleet` (`context-lens/fleet`)
