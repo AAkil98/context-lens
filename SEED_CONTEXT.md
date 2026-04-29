@@ -184,7 +184,7 @@ Key decisions made in Spec 11:
 - Reference implementation ships schema files, static exports, toJSON() utilities, and validation functions
 - 10 invariants including schema conformance, version consistency, self-containment, forward compatibility, deterministic serialization
 
-**Spec 14 (Serialization) is draft:** `specs/14-serialization.md`
+**Spec 14 (Serialization) is complete:** `specs/14-serialization.md`
 
 Key decisions made in Spec 14:
 - OQ-012 resolved: one method, one format, one option — `snapshot({ includeContent })` for full or lightweight snapshots
@@ -193,7 +193,15 @@ Key decisions made in Spec 14:
 - Lightweight snapshot (`includeContent: false`): same format, content null, `restorable: false`, ~10x smaller (~100KB vs ~1.1MB for 500 segments)
 - `fromSnapshot(state, config)` static factory: atomic restore, provider change detection, custom pattern matching by name, quality score invalidation on first assess()
 - Format versioning: "context-lens-snapshot-v1", independent of schema version, forward+backward compatible
-- 8 invariants including snapshot equivalence, round-trip fidelity, atomic restore, content completeness
+- 10 invariants including snapshot equivalence, round-trip fidelity, atomic restore, content completeness, snapshot governed by lifecycle gates, restored instance is live and independent
+
+Lifecycle amendment (2026-04-29) — cl-spec-015 integration:
+- §1 Overview: snapshot-then-dispose-then-fromSnapshot listed as the fourth motivating use case (state-preserving continuation across disposal).
+- §3.2 Snapshot Is Read-Only: notes that `snapshot()` is governed by the read-only-during-disposal rule — works during `isDisposing === true`, throws `DisposedError` post-disposal.
+- New §3.4 Snapshot-then-dispose continuation: documents the canonical pattern with code example. Snapshot must precede `dispose()`; no recovery path post-disposal.
+- §5.5 Restored Instance Behavior expanded with lifecycle-state paragraph: restored instance is always live, has fresh `instanceId`, source's disposal status does not propagate.
+- New invariants 9 and 10: snapshot governed by lifecycle gates; restored instance is live and independent.
+- Status flipped from `draft` to `complete`.
 
 **Spec 12 (Fleet Monitor) is complete:** `specs/12-fleet-monitor.md`
 
