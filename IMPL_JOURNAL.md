@@ -30,7 +30,7 @@ Released: pending. v0.1.0 baseline shipped to npm 2026-04-09.
 |---|------|--------|-------|--------|
 | T1 | Create `IMPL_JOURNAL.md` (this file) | done | `IMPL_JOURNAL.md` | (this commit) |
 | T2 | Amend `impl/I-06-lifecycle.md` — specify `emitCollect` for `stateDisposed` dispatch | done | `impl/I-06-lifecycle.md` | `0e379d6` |
-| T3 | `errors.ts` — add `DisposedError`, `DisposalError`, `tagOrigin` helper; re-export from `index.ts` | pending | `src/errors.ts`, `src/index.ts`, `test/unit/errors.test.ts` | — |
+| T3 | `errors.ts` — add `DisposedError`, `DisposalError`, `tagOrigin` helper; re-export from `index.ts` | done | `src/errors.ts`, `src/index.ts`, `test/unit/errors.test.ts` | (this commit) |
 | T4 | `events.ts` — add `StateDisposedEvent` type, `stateDisposed` map entry, `emitCollect` method on `EventEmitter`; re-export type | pending | `src/events.ts`, `src/index.ts`, `test/unit/events.test.ts` | — |
 | T5 | `lifecycle.ts` — types (`IntegrationTeardown`, `IntegrationHandle`, `LifecycleState`) and `IntegrationRegistry` class | pending | `src/lifecycle.ts` (new), `test/unit/lifecycle.test.ts` (new) | — |
 | T6 | `lifecycle.ts` — `READ_ONLY_METHODS` audit + `guardDispose` helper. Reconcile spec's 13 names with actual `ContextLens` surface (incl. `getEvictionHistory` vs `getEvictedSegments`; classify `getTokenizerInfo`, `getEmbeddingProviderInfo`, `getBaseline`, `getConstructionTimestamp`, `getConfig`, `getPerformance`, `getDetection`) | pending | `src/lifecycle.ts`, `test/unit/lifecycle.test.ts` | — |
@@ -58,6 +58,12 @@ Released: pending. v0.1.0 baseline shipped to npm 2026-04-09.
 - Tracker created for Phase 6 / v0.2.0.
 - 17-task plan recorded; T1 + T2 closed, T3–T17 pending.
 - Test baseline noted (977 from Phase 5 exit).
+
+### T3 (done — this commit)
+- `DisposedError extends Error` and `DisposalError extends AggregateError` landed; both bypass `ContextLensError` per cl-spec-015 §7.2 (need native-class inheritance).
+- Internal helpers `tagOrigin(error, origin, index)` and `isHandlerOriginTag(value)` added. Resolved the spec inconsistency between the documented `tagOrigin(error, origin)` signature and the `{ cause, origin, index }` return shape in favor of an explicit `index` parameter — orchestrator tracks index externally.
+- Both error classes re-exported from package main entry; helpers stay internal (lifecycle.ts will import directly).
+- Tests: 88 → 103 in `errors.test.ts` (+15 cases: 5 DisposedError, 6 DisposalError, 4 helper). Full suite: 977 → 992. Typecheck + build clean.
 
 ## Test baseline
 

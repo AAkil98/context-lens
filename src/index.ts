@@ -1143,6 +1143,8 @@ export {
   SplitError,
   RestoreError,
   ProviderError,
+  DisposedError,
+  DisposalError,
 } from './errors.js';
 
 // Event map type — consumers need this for typed event handlers

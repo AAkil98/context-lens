@@ -13,6 +13,10 @@ import {
   SplitError,
   RestoreError,
   ProviderError,
+  DisposedError,
+  DisposalError,
+  tagOrigin,
+  isHandlerOriginTag,
 } from '../../src/errors.js';
 
 const subclasses = [
@@ -94,5 +98,107 @@ describe.each(subclasses)('$name', ({ Cls, code, name }) => {
     const err = new Cls('msg');
     expect(err instanceof ContextLensError).toBe(true);
     expect(err instanceof Cls).toBe(true);
+  });
+});
+
+// ─── Lifecycle errors (cl-spec-015 §7.2) ─────────────────────────
+
+describe('DisposedError', () => {
+  it('extends Error and DisposedError, but not ContextLensError', () => {
+    const err = new DisposedError('cl-1-abc123', 'add', 'disposed');
+    expect(err).toBeInstanceOf(Error);
+    expect(err).toBeInstanceOf(DisposedError);
+    expect(err).not.toBeInstanceOf(ContextLensError);
+  });
+
+  it('has name "DisposedError"', () => {
+    const err = new DisposedError('cl-1-abc123', 'add', 'disposed');
+    expect(err.name).toBe('DisposedError');
+  });
+
+  it('carries instanceId and attemptedMethod from constructor', () => {
+    const err = new DisposedError('cl-42-xyz789', 'evict', 'disposed');
+    expect(err.instanceId).toBe('cl-42-xyz789');
+    expect(err.attemptedMethod).toBe('evict');
+  });
+
+  it('formats message for the disposed state', () => {
+    const err = new DisposedError('cl-1-abc123', 'add', 'disposed');
+    expect(err.message).toBe('ContextLens instance cl-1-abc123 is disposed; cannot call add()');
+  });
+
+  it('formats message for the disposing state', () => {
+    const err = new DisposedError('cl-1-abc123', 'add', 'disposing');
+    expect(err.message).toBe('ContextLens instance cl-1-abc123 is disposing; cannot call add()');
+  });
+});
+
+describe('DisposalError', () => {
+  it('extends AggregateError and DisposalError, but not ContextLensError', () => {
+    const err = new DisposalError('cl-1-abc123', [new Error('boom')]);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).toBeInstanceOf(AggregateError);
+    expect(err).toBeInstanceOf(DisposalError);
+    expect(err).not.toBeInstanceOf(ContextLensError);
+  });
+
+  it('has name "DisposalError"', () => {
+    const err = new DisposalError('cl-1-abc123', []);
+    expect(err.name).toBe('DisposalError');
+  });
+
+  it('exposes constituent errors via AggregateError.errors', () => {
+    const e1 = new Error('first');
+    const e2 = new Error('second');
+    const err = new DisposalError('cl-1-abc123', [e1, e2]);
+    expect(err.errors).toHaveLength(2);
+    expect(err.errors[0]).toBe(e1);
+    expect(err.errors[1]).toBe(e2);
+  });
+
+  it('carries instanceId from constructor', () => {
+    const err = new DisposalError('cl-99-zzz000', []);
+    expect(err.instanceId).toBe('cl-99-zzz000');
+  });
+
+  it('counts tagged handlers vs integrations in the default message', () => {
+    const e1 = tagOrigin(new Error('h1'), 'handler', 0);
+    const e2 = tagOrigin(new Error('h2'), 'handler', 1);
+    const e3 = tagOrigin(new Error('i1'), 'integration', 0);
+    const err = new DisposalError('cl-1-abc123', [e1, e2, e3]);
+    expect(err.message).toBe(
+      'ContextLens instance cl-1-abc123 disposed with 3 callback errors (2 handlers, 1 integrations)',
+    );
+  });
+
+  it('reports zero handlers when only untagged errors are present', () => {
+    const err = new DisposalError('cl-1-abc123', [new Error('untagged')]);
+    expect(err.message).toContain('1 callback errors (0 handlers, 1 integrations)');
+  });
+});
+
+describe('tagOrigin / isHandlerOriginTag', () => {
+  it('tagOrigin returns the documented shape', () => {
+    const cause = new Error('boom');
+    const tagged = tagOrigin(cause, 'handler', 3);
+    expect(tagged.cause).toBe(cause);
+    expect(tagged.origin).toBe('handler');
+    expect(tagged.index).toBe(3);
+  });
+
+  it('isHandlerOriginTag is true for handler-origin tags', () => {
+    expect(isHandlerOriginTag(tagOrigin(new Error(), 'handler', 0))).toBe(true);
+  });
+
+  it('isHandlerOriginTag is false for integration-origin tags', () => {
+    expect(isHandlerOriginTag(tagOrigin(new Error(), 'integration', 0))).toBe(false);
+  });
+
+  it('isHandlerOriginTag is false for non-tagged values', () => {
+    expect(isHandlerOriginTag(new Error('plain'))).toBe(false);
+    expect(isHandlerOriginTag(null)).toBe(false);
+    expect(isHandlerOriginTag(undefined)).toBe(false);
+    expect(isHandlerOriginTag('string')).toBe(false);
+    expect(isHandlerOriginTag({ origin: 'handler' })).toBe(false);  // missing index
   });
 });
