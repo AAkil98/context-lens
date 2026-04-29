@@ -2,11 +2,11 @@
 id: cl-spec-007
 title: API Surface
 type: design
-status: draft (amended)
+status: complete
 created: 2026-04-02
-revised: 2026-04-04
-authors: [Akil Abderrahim, Claude Opus 4.6]
-tags: [api, public-interface, constructor, configuration, lifecycle, events, errors, serialization, snapshot, patterns]
+revised: 2026-04-29
+authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
+tags: [api, public-interface, constructor, configuration, lifecycle, dispose, events, errors, serialization, snapshot, patterns]
 depends_on: [cl-spec-001, cl-spec-002, cl-spec-003, cl-spec-004, cl-spec-005, cl-spec-006]
 ---
 
@@ -22,10 +22,11 @@ depends_on: [cl-spec-001, cl-spec-002, cl-spec-003, cl-spec-004, cl-spec-005, cl
 6. Quality Operations
 7. Provider Management
 8. Capacity and Inspection
-9. Event System
-10. Error Model
-11. Invariants and Constraints
-12. References
+9. Lifecycle
+10. Event System
+11. Error Model
+12. Invariants and Constraints
+13. References
 
 ---
 
@@ -52,13 +53,13 @@ Stateful does not mean persistent. Instance state lives in memory for the sessio
 
 - **One instance, one window.** Each context-lens instance monitors one context window. To monitor multiple windows (e.g., parallel conversations), create multiple instances. Instances do not share state.
 - **Caller-driven mutations.** context-lens never modifies the context window on its own. It does not auto-evict, auto-compact, or auto-reorder. Every mutation originates from an explicit caller method call. context-lens measures and advises; the caller decides and acts.
-- **Fail-fast on misuse.** Invalid arguments, violated preconditions, and broken invariants throw immediately. context-lens does not silently accept bad input and produce bad output. The error model (section 10) defines what fails and why.
+- **Fail-fast on misuse.** Invalid arguments, violated preconditions, and broken invariants throw immediately. context-lens does not silently accept bad input and produce bad output. The error model (section 11) defines what fails and why.
 - **Consistent snapshots.** Every read operation returns data consistent with the most recent mutation. There is no eventual consistency, no stale reads, no race between mutation and query. When `add` returns, the segment is immediately visible in `listSegments`, counted in `getUtilization`, and scorable in the next `assess` call.
 - **Progressive disclosure.** The minimal viable usage is three lines: construct with a capacity, add segments, call `assess`. Advanced features — providers, groups, tasks, events, threshold overrides — are opt-in. A caller who ignores them gets sensible defaults.
 
 ### API categories
 
-The public API is organized into eleven categories:
+The public API is organized into twelve categories:
 
 | Category | Purpose | Key methods |
 |----------|---------|-------------|
@@ -73,8 +74,9 @@ The public API is organized into eleven categories:
 | **Capacity and inspection** | Query window state without scoring | `getCapacity`, `setCapacity`, `getSegment`, `listSegments`, `getSegmentCount`, `getEvictionHistory` |
 | **Diagnostics** | Inspect internal state | `getDiagnostics` |
 | **Eviction planning** | Produce advisory eviction plans | `planEviction` |
+| **Lifecycle** | Transition the instance to its terminal state and probe lifecycle state | `dispose`, `isDisposed`, `isDisposing` |
 
-An **event system** (section 9) provides lifecycle hooks. An **error model** (section 10) defines failure modes.
+An **event system** (section 10) provides lifecycle hooks. An **error model** (section 11) defines failure modes.
 
 ### What the API is not
 
@@ -1023,11 +1025,57 @@ See cl-spec-008 for the complete EvictionPlan structure and ranking algorithm.
 
 ---
 
-## 9. Event System
+## 9. Lifecycle
 
-context-lens emits 24 events on lifecycle transitions. The event system is synchronous and observer-based — handlers are called inline during the operation that triggers the event. This means handlers execute before the triggering method returns.
+context-lens instances have an explicit terminal state. The methods documented in this section transition an instance to that state and let callers probe its current state. The full behavioral contract — teardown sequence, atomicity, failure model, integration callbacks, error semantics, and per-method dispatch rules during and after disposal — is specified by cl-spec-015. This section summarizes the public surface; cl-spec-015 governs behavior.
 
-### 9.1 Subscribing
+The three lifecycle methods (`dispose`, `isDisposed`, `isDisposing`) are the only public methods that remain valid after disposal. Every other public method on a disposed instance throws `DisposedError` (section 11.1). Mutating public methods invoked while disposal is in progress (`isDisposing === true`) also throw `DisposedError` per the read-only-during-disposal rule (cl-spec-015 §3.4).
+
+### 9.1 dispose
+
+```
+dispose() → void
+```
+
+Transitions the instance from live to disposed. Synchronous, idempotent, parameterless. The teardown sequence — set disposing flag, emit `stateDisposed`, notify lifecycle-aware integrations (fleet aggregators per cl-spec-012, OpenTelemetry exporters per cl-spec-013), clear caches and ring buffers, detach the event registry, set the disposed flag — is specified by cl-spec-015 §4.
+
+Caller-supplied callback errors during steps 2 (`stateDisposed` handlers) and 3 (integration teardown callbacks) are caught, aggregated into a per-call disposal error log, and surfaced as a single `DisposalError` (section 11.1) raised after teardown completes. Disposal itself is unconditional — it completes regardless of how many callbacks throw, and the instance is fully disposed at the moment `DisposalError` is raised.
+
+Calling `dispose()` on an already-disposed instance is a no-op: no event, no teardown, no error. Reentrant calls from inside a `stateDisposed` handler observe `isDisposing === true` and return immediately.
+
+Provider lifecycle (tokenizer per cl-spec-006, embedding provider per cl-spec-005) is caller-managed — `dispose()` does not invoke provider shutdown hooks. The recommended caller pattern is `dispose()` first (releasing the library's references) and then await any provider shutdowns (cl-spec-015 §6.5).
+
+Throws `DisposalError` only if one or more caller-supplied callbacks threw during teardown. Never throws on its own internal logic; library-internal teardown steps are infallible by construction (cl-spec-015 §4.3).
+
+### 9.2 isDisposed
+
+```
+readonly isDisposed: boolean
+```
+
+Returns `true` once `dispose()` has returned successfully (the disposed flag set in step 6 of teardown), `false` otherwise. Never throws. Remains valid in both live and disposed states.
+
+The predicate for "is this instance terminal?" — used by external integrations and caller-supplied health checks to decide whether to invoke methods that need post-disposal recovery semantics (cl-spec-015 §2.5).
+
+### 9.3 isDisposing
+
+```
+readonly isDisposing: boolean
+```
+
+Returns `true` while a `dispose()` call is on the stack — between the start of teardown (the disposing flag set in step 1) and the originating call's return — and `false` otherwise. Never throws. Remains valid in both live and disposed states.
+
+The predicate for "should I avoid mutating methods right now?" — used by `stateDisposed` handlers and integration teardown callbacks to gate their own mutation calls (cl-spec-015 §2.5). During disposal, mutating public methods throw `DisposedError` per the read-only-during-disposal rule; read-only methods behave per their live specification until backing state is cleared.
+
+`isDisposed` and `isDisposing` are mutually exclusive — at most one is true at any inspection point. Both are false during normal live operation.
+
+---
+
+## 10. Event System
+
+context-lens emits 25 events on lifecycle transitions. The event system is synchronous and observer-based — handlers are called inline during the operation that triggers the event. This means handlers execute before the triggering method returns.
+
+### 10.1 Subscribing
 
 ```
 on(event: EventName, handler: (payload: EventPayload) -> void) -> Unsubscribe
@@ -1037,7 +1085,7 @@ Registers an event handler. Returns an unsubscribe function that removes the han
 
 Multiple handlers can be registered for the same event. Handlers are called in registration order. Handler errors are caught and do not propagate to the caller or prevent subsequent handlers from running — a failing handler should not break context-lens operations.
 
-### 9.2 Events
+### 10.2 Events
 
 | Event | Payload | Emitted when |
 |-------|---------|-------------|
@@ -1065,22 +1113,25 @@ Multiple handlers can be registered for the same event. Handlers are called in r
 | `stateRestored` | `{ formatVersion: string, segmentCount: number, providerChanged: boolean, customPatternsRestored: number, customPatternsUnmatched: number }` | `fromSnapshot` completes restoration on the new instance. |
 | `reportGenerated` | `{ report: QualityReport }` | Fired after each `assess()` completes. Payload: the QualityReport. |
 | `budgetViolation` | `{ operation: string, selfTime: number, budgetTarget: number }` | Fired when an operation exceeds its performance budget tier. |
+| `stateDisposed` | `{ type: 'stateDisposed', instanceId: string, timestamp: number }` | Fired exactly once per instance during step 2 of `dispose()` teardown. Last event the instance ever emits. Payload is frozen. See cl-spec-015 §7.1. |
 
 The session timeline (cl-spec-010 section 5) records a superset of API events. Some timeline event types (e.g., `patternEscalated`, `patternDeescalated`) are logged to the timeline but not emitted as API events.
 
-### 9.3 Handler Contract
+### 10.3 Handler Contract
 
 - Handlers **must not** call context-lens methods on the same instance. Re-entrant calls (e.g., calling `add` inside a `segmentEvicted` handler) would violate atomicity invariants. context-lens does not guard against re-entrancy — the behavior is undefined. If the caller needs to react to events with mutations, they should queue the mutations and apply them after the triggering operation returns.
 - Handlers should be fast. They run inline — a slow handler slows down the operation that triggered the event.
 - Handler errors are caught, logged (if a logger is configured), and swallowed. The operation proceeds regardless of handler failures. This prevents observer bugs from corrupting context-lens state.
 
+The general "must not call methods, behavior is undefined" rule above has a single deliberate exception: `stateDisposed` handlers (cl-spec-015 §3.4) are governed by the **read-only-during-disposal rule**. They may call read-only public methods (`getCapacity`, `getSegment`, `getDiagnostics`, `assess`, `snapshot`, etc.) — the instance's last live state is intact and may be inspected. Mutating public methods invoked from a `stateDisposed` handler throw `DisposedError` (cl-spec-015 §3.4); they do not fall through to "undefined behavior." Handler errors during `stateDisposed` are also handled differently: rather than being swallowed-and-logged per the rule above, they are aggregated and surfaced as `DisposalError` after teardown completes (cl-spec-015 §4.3, section 11.1). Both deviations exist because disposal is a one-shot terminal lifecycle event — silent corruption of teardown is unacceptable, and per-callback errors carry diagnostic signal that the caller cannot recover from any other source.
+
 ---
 
-## 10. Error Model
+## 11. Error Model
 
 context-lens uses typed errors with a clear hierarchy. Every error thrown by a public method is an instance of one of these types. Callers can catch specific error types to handle specific failure modes.
 
-### 10.1 Error Hierarchy
+### 11.1 Error Hierarchy
 
 ```
 ContextLensError (base)
@@ -1096,7 +1147,14 @@ ContextLensError (base)
 ├── SplitError               — splitFn produced invalid output
 ├── RestoreError             — restore without content when content was not retained
 └── ProviderError            — tokenizer or embedding provider validation/execution failure
+
+Lifecycle errors (cl-spec-015) — extend native Error rather than ContextLensError:
+DisposedError extends Error              — public method invoked on a disposed instance,
+                                            or mutating method invoked during disposal
+DisposalError extends AggregateError     — caller-supplied callbacks errored during dispose() teardown
 ```
+
+The lifecycle errors deliberately bypass `ContextLensError` so they can extend platform-native classes (`AggregateError` in particular requires the inheritance chain). Callers distinguish them from `ContextLensError` subclasses using `instanceof` and the `name` field. See cl-spec-015 §7.2 for full type definitions, fields, and message conventions.
 
 All errors extend `ContextLensError`, which extends the platform's native `Error`. Every error includes:
 
@@ -1107,7 +1165,9 @@ All errors extend `ContextLensError`, which extends the platform's native `Error
 | `code` | string | Machine-readable error code (e.g., `"SEGMENT_NOT_FOUND"`). |
 | `details` | object or `null` | Structured context: which segment ID, which operation, what the expected state was. |
 
-### 10.2 Error Codes
+The lifecycle errors (`DisposedError`, `DisposalError`) do not carry the `ContextLensError` fields above. They expose their own fields per cl-spec-015 §7.2: `DisposedError` carries `name`, `instanceId`, `attemptedMethod`; `DisposalError` carries `name`, `instanceId`, and the inherited `errors` array from `AggregateError`.
+
+### 11.2 Error Codes
 
 | Code | Error type | Trigger |
 |------|-----------|---------|
@@ -1125,15 +1185,17 @@ All errors extend `ContextLensError`, which extends the platform's native `Error
 | `PROVIDER_VALIDATION` | `ProviderError` | Provider fails validation (bad count, bad metadata). |
 | `PROVIDER_EXECUTION` | `ProviderError` | Provider throws during count/embed. |
 
-### 10.3 Error Guarantees
+The lifecycle errors are not assigned `code` strings — they are distinguished by class identity (`instanceof DisposedError`, `instanceof DisposalError`) and by their `name` field per cl-spec-015 §7.2.
 
-1. **Atomic failure.** If a method throws, no observable state has changed. The instance is in the same state as before the call. This applies to all segment operations, group operations, and task operations. Provider switches are the one exception: a mid-switch embedding failure results in trigram fallback rather than rollback (section 7.2).
+### 11.3 Error Guarantees
+
+1. **Atomic failure.** If a method throws, no observable state has changed. The instance is in the same state as before the call. This applies to all segment operations, group operations, and task operations. Provider switches are the one exception: a mid-switch embedding failure results in trigram fallback rather than rollback (section 7.2). `dispose()` is also an exception: when it throws `DisposalError` after caller-supplied callbacks errored, the instance has already transitioned to disposed and the error is informational (cl-spec-015 §4.3).
 2. **No silent failures.** context-lens does not swallow errors and return partial results. If token counting fails for one segment in a `seed` batch, the entire batch fails. The caller always knows whether an operation succeeded or not.
-3. **Predictable types.** Every public method documents which error types it can throw. A method that documents `SegmentNotFoundError` and `ProtectionError` will only throw those types (plus `ProviderError` if the operation triggers token counting or embedding). Callers can write exhaustive catch blocks.
+3. **Predictable types.** Every public method documents which error types it can throw. A method that documents `SegmentNotFoundError` and `ProtectionError` will only throw those types (plus `ProviderError` if the operation triggers token counting or embedding). Callers can write exhaustive catch blocks. Every public method other than `dispose`, `isDisposed`, and `isDisposing` additionally throws `DisposedError` when invoked on a disposed instance, and mutating methods additionally throw `DisposedError` when invoked during disposal — these are universal post/during-disposal guards documented globally rather than per-method (cl-spec-015 §5.1, §3.4).
 
 ---
 
-## 11. Invariants and Constraints
+## 12. Invariants and Constraints
 
 The following invariants hold across all public API operations. They extend and do not contradict the invariants defined in specs 1–6.
 
@@ -1157,9 +1219,9 @@ The following invariants hold across all public API operations. They extend and 
 
 **Read-only consumer contract.** Consumer modules (eviction advisory, diagnostics, fleet monitor, observability exporter) do not call segment-mutating methods (`add`, `update`, `replace`, `compact`, `split`, `evict`, `restore`) or configuration-mutating methods (`setTask`, `clearTask`, `setTokenizer`, `setEmbeddingProvider`). They may call `assess()`, which updates internal caches but does not modify segments or configuration.
 
-**Instance lifecycle.** context-lens instances require no explicit disposal. All resources (caches, history buffers, event handlers) are released when the instance is garbage collected. Callers managing external integrations (OTel exporters, fleet registrations) should detach these before releasing the instance reference.
+**Instance lifecycle.** context-lens instances have an explicit terminal state and the `dispose()` method that transitions to it (section 9, cl-spec-015). Long-lived callers (monitoring daemons, multi-agent orchestrators, server processes handling rolling contexts) **must** call `dispose()` to release event handlers, caches, history buffers, and external integration back-references — garbage collection alone is insufficient because event subscribers and integrations hold strong references that prevent GC. Short-lived callers **may** call `dispose()` to release resources earlier than GC would. After `dispose()` returns, `isDisposed === true` and every public method except `dispose`, `isDisposed`, and `isDisposing` throws `DisposedError`. The full lifecycle contract — teardown sequence, atomicity, integration callbacks, error semantics — is specified by cl-spec-015. This invariant supersedes the prior "no explicit disposal" claim that this section formerly carried.
 
-**Single-threaded access.** context-lens assumes single-threaded, sequential access. Concurrent calls from multiple async contexts produce undefined behavior. Callers in async environments must serialize access to each instance. Re-entrant calls from event handlers are also prohibited (section 9.3).
+**Single-threaded access.** context-lens assumes single-threaded, sequential access. Concurrent calls from multiple async contexts produce undefined behavior. Callers in async environments must serialize access to each instance. Re-entrant calls from event handlers are also prohibited (section 10.3).
 
 ### Cross-Spec Invariant Summary
 
@@ -1186,7 +1248,7 @@ This spec inherits all invariants from specs 1–6. The key cross-cutting invari
 
 ---
 
-## 12. References
+## 13. References
 
 | Reference | Description |
 |-----------|-------------|
@@ -1201,8 +1263,9 @@ This spec inherits all invariants from specs 1–6. The key cross-cutting invari
 | `cl-spec-010` (Report & Diagnostics) | Extended reporting, diagnostics API, trend analysis. Depends on this spec. |
 | `cl-spec-011` (Report Schema) | JSON Schema definitions for QualityReport, DiagnosticSnapshot, EvictionPlan. Schema versioning. Serialization conventions. Defines what `toJSON` produces and what `validate` checks. |
 | `cl-spec-014` (Serialization) | Defines snapshot format, restore semantics, lightweight snapshots, format versioning. Governs what `snapshot()` produces and what `fromSnapshot()` consumes. |
+| `cl-spec-015` (Instance Lifecycle) | Defines `dispose()`, `isDisposed`, `isDisposing`, the `stateDisposed` event, and the `DisposedError` / `DisposalError` types added by section 9, section 10.2, and section 11.1 of this spec. Specifies the teardown sequence, atomicity, integration callbacks, and the read-only-during-disposal rule. The handler contract deviation from section 10.3 is documented in cl-spec-015 §3.4 and §4.3. |
 | `brainstorm_20260324_context-lens.md` | Origin brainstorm — API shape exploration (Options A/B/C), MVP scope. |
 
 ---
 
-*context-lens — authored by Akil Abderrahim and Claude Opus 4.6*
+*context-lens — authored by Akil Abderrahim, Claude Opus 4.6, and Claude Opus 4.7*

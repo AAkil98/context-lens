@@ -99,7 +99,7 @@ Key decisions made in Spec 5:
 - Fallback: individual failures propagate (no silent per-call fallback). Report-level trigram fallback on persistent failure. Mode consistency enforced per report. No cross-mode score comparison.
 - 10 invariants including single provider, mode consistency, fallback always available, lifecycle-synchronous embedding.
 
-**Spec 7 (API Surface) is draft (amended, minor amendment remaining):** `specs/07-api-surface.md`
+**Spec 7 (API Surface) is complete:** `specs/07-api-surface.md`
 
 Key decisions made in Spec 7:
 - OQ-008 resolved: stateful API. Each instance owns segments, scores, caches, history. Stateless rejected (continuity, patterns, caching, baseline all need lifecycle awareness).
@@ -121,6 +121,15 @@ Key decisions made in Spec 7:
 Amendment complete: `snapshot()`/`fromSnapshot()` added after cl-spec-014 (Serialization) was drafted. 22 events total (19 original + customPatternRegistered + stateSnapshotted + stateRestored).
 
 Further amendment during implementation: `reportGenerated` and `budgetViolation` added. 24 events total.
+
+Lifecycle amendment (2026-04-29) — cl-spec-015 integration:
+- New §9 "Lifecycle" section added (between Capacity/Inspection and Event System). Documents `dispose()`, `isDisposed`, `isDisposing` with cross-references to cl-spec-015 for the full contract.
+- §10.2 events catalog grew from 24 to 25: added `stateDisposed`.
+- §10.3 handler contract gained a paragraph documenting the deliberate deviation for `stateDisposed` handlers — read-only-during-disposal rule, errors aggregated into `DisposalError`. The deviation is justified on disposal's one-shot terminal nature.
+- §11.1 error hierarchy: `DisposedError` and `DisposalError` added as native-Error and AggregateError subclasses respectively (do not extend `ContextLensError` — see cl-spec-015 §7.2 for rationale).
+- §12 invariants: the prior "Instance lifecycle" paragraph that asserted "no explicit disposal required" is replaced — long-lived callers must now `dispose()`, short-lived callers may.
+- Sections renumbered: Event System §9 → §10, Error Model §10 → §11, Invariants §11 → §12, References §12 → §13. TOC updated. Internal cross-references updated.
+- Status flipped from `draft (amended)` to `complete`.
 
 **Spec 8 (Eviction Advisory) is draft (amended):** `specs/08-eviction-advisory.md`
 
