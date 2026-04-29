@@ -271,13 +271,18 @@ Grill outcomes (2026-04-29) — three decisions applied to the spec; status flip
 
 ## Current state
 
-**Implementation and testing complete. Ready for packaging and v0.1.0 publish.**
+**v0.1.0 shipped to npm 2026-04-09. v0.2.0 design complete; Phase 6 implementation pending on `feat/dispose-lifecycle`.**
 
-- 33/33 build tasks done across 5 phases
-- 977 tests passing across 36 test files + 12 performance benchmarks
-- All typechecks clean
-- Report assembler cache bug fixed (was not invalidating on segment mutations)
-- ~10,200 source LOC, ~15,500 test LOC
+v0.1.0 baseline:
+- 33/33 build tasks done across 5 phases (~10,200 source LOC, ~15,500 test LOC)
+- 977 tests passing across 36 test files + 12 performance benchmarks; all typechecks clean
+- Published as `@madahub/context-lens` on npm
+
+v0.2.0 design (this branch):
+- cl-spec-015 (Instance Lifecycle) added; cl-spec-005/006/007/012/013/014 amended for cross-cutting integration
+- 15 design-spec invariants in cl-spec-015 covering state machine, dispose contract, teardown atomicity, post-disposal access, events/errors, integrations/providers, stable identity
+- `impl/I-06-lifecycle.md` drafted (~543 lines) covering Phase 6 build plan
+- Nine commits ahead of `main`: eight from this session + one prior planning commit
 
 ### What's built
 
@@ -288,6 +293,7 @@ Grill outcomes (2026-04-29) — three decisions applied to the spec; status flip
 | 3 — Detection & Advisory | **Complete** | detection (5 patterns, hysteresis, compounds, custom registration, fail-open, history), eviction (5-signal ranking, tiers, strategies, compaction), performance (timing, budgets, sampling) |
 | 4 — Public API & Diagnostics | **Complete** | ContextLens class (constructor, 8 segment ops, 4 group ops, task ops, assess, planEviction, provider mgmt, capacity), diagnostics (history, trends, timeline, warnings), formatters (3 pure functions) |
 | 5 — Enrichments | **Complete** | schemas (JSON Schema draft 2020-12, toJSON, validate), serialization (snapshot/fromSnapshot, format versioning, provider change detection), fleet (ContextLensFleet, assessFleet, aggregation, fleet events), OTel (ContextLensExporter, 9 gauges, 6 counters, 1 histogram, 5 log events) |
+| 6 — Instance Lifecycle (v0.2.0) | **Designed; impl pending** | New `lifecycle.ts` module (IntegrationRegistry, READ_ONLY_METHODS classification, guardDispose, runTeardown). Modifications to `errors` (DisposedError, DisposalError), `events` (stateDisposed event → 25 events total), `index` (dispose, isDisposed, isDisposing, instanceId, disposed-state guard at every public method), `fleet` (auto-unregister, instanceDisposed event), `otel` (auto-disconnect, instance.disposed log event) |
 
 ### Test coverage
 
@@ -316,11 +322,13 @@ Grill outcomes (2026-04-29) — three decisions applied to the spec; status flip
 |-------|----------|-------|
 | Baseline not wired | Low | `BaselineManager.notifyAdd()` never called from `captureBaseline()`. Scores work correctly without it (raw scores used). Fix before v0.1.0. |
 | assess@500 over budget | Low | O(n^2) similarity at 500 segments takes ~300ms vs 50ms budget. Sampling mitigates in practice. |
-| No dispose method | Info | Event handlers and caches persist until GC. Design spec drafted (cl-spec-015); implementation pending for v0.2.0. |
+| No dispose method | Resolved in design | cl-spec-015 complete (post-grill, 15 invariants). Cross-cutting amendments to cl-spec-005/006/007/012/013/014 committed. `impl/I-06-lifecycle.md` ready for Phase 6 implementation. v0.2.0 target. |
 
 ## What's next
 
-**Shipping.** See `SHIPPING.md` for the full pre-publish checklist, known issues, and release plan (v0.1.0 through v0.3.0).
+**v0.2.0 Phase 6 implementation.** Execute `impl/I-06-lifecycle.md` on the `feat/dispose-lifecycle` branch. The build plan covers: a new internal `lifecycle.ts` module, two new error types in `errors.ts`, the `stateDisposed` event in `events.ts`, lifecycle methods + guard wiring on `ContextLens`, fleet auto-unregister, and OTel auto-disconnect. Test matrix: 5 unit-test groups, 15 integration flows, 4 property-based properties, 3 microbenchmarks (including a < 100 ns target for the disposed-state guard).
+
+See `SHIPPING.md` for the full v0.2.0–v0.3.0 release plan.
 
 ## Design review history
 
@@ -377,10 +385,22 @@ Key technology decisions: TypeScript strict mode, tsup for ESM+CJS dual build, v
 
 ## Files to read on pickup
 
-1. `SHIPPING.md` — pre-publish checklist, known issues, release plan (v0.1.0–v0.3.0)
-2. `IMPLEMENTATION.md` — implementation strategy, tech stack, package structure, dependency graph, Phase 1 inline
-3. `impl/I-02-scoring-engine.md` through `impl/I-05-enrichments.md` — per-phase implementation specs
-4. `specs/01-segment-model.md` through `specs/14-serialization.md` — 14 design specs (authoritative behavioral reference)
+Working on v0.2.0 Phase 6 (dispose lifecycle):
+
+1. `impl/I-06-lifecycle.md` — Phase 6 build plan (start here)
+2. `specs/15-instance-lifecycle.md` — design spec; the source of truth for behavior
+3. `specs/07-api-surface.md` §9 (Lifecycle), §10.2 (stateDisposed event), §10.3 (handler-contract deviation), §11.1 (DisposedError, DisposalError)
+4. `specs/12-fleet-monitor.md` §7 (Instance Disposal Handling)
+5. `specs/13-observability-export.md` §2.1 (Lifecycle, two subsections)
+6. `specs/14-serialization.md` §3.4 (Snapshot-then-dispose continuation)
+7. Branch `feat/dispose-lifecycle`, nine commits ahead of `main`. Untracked: `specs/draft.md` (grill notes, kept across the design phase; can be discarded or archived after Phase 6 impl)
+
+Reference (existing v0.1.0 baseline):
+
+8. `IMPLEMENTATION.md` — strategy document with Phase 6 row added in §5
+9. `SHIPPING.md` — release plan
+10. `impl/I-02-scoring-engine.md` through `impl/I-05-enrichments.md` — prior-phase impl specs
+11. `specs/01-segment-model.md` through `specs/14-serialization.md` — design specs (authoritative behavioral reference)
 
 **Archived:** `REVIEW.md` and `REVIEW_FINDINGS.md` exported to `../archive/context-lens-REVIEW.md` and `../archive/context-lens-REVIEW_FINDINGS.md`
 **Removed:** `IMPL_JOURNAL.md` (build tracker, superseded — all 33 tasks done) and `TEST_STRATEGY.md` (testing uplift plan, superseded — all 5 phases complete)
