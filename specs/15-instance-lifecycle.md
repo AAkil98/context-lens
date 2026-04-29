@@ -30,7 +30,7 @@ depends_on: [cl-spec-007, cl-spec-012, cl-spec-013, cl-spec-014]
 
 A context-lens instance accumulates resources across a session: token caches (cl-spec-006 §5), embedding caches (cl-spec-005 §5), similarity caches, the continuity ledger (cl-spec-002 §6), report and timeline ring buffers (cl-spec-010), event handler closures (cl-spec-007 §9), fleet registrations (cl-spec-012), and OpenTelemetry exporter subscriptions (cl-spec-013). cl-spec-007 §11 previously asserted that these resources "are released when the instance is garbage collected", and for short-lived sessions that is sufficient. For long-lived callers — monitoring daemons, multi-agent orchestrators, server processes handling rolling contexts — garbage collection is the wrong disposal signal. Event handlers hold strong references to the instance; the instance holds strong references to caches and history buffers; external integrations (fleets, exporters) hold their own strong references to the instance. GC never runs until every such reference drops, and in practice that means never within the process's useful life. The observable consequences are memory growth that cannot be shed without restart, fleet reports that include stale instances, and exporter subscriptions that fire on replaced contexts.
 
-This spec introduces an explicit terminal state for context-lens instances and the operation that transitions to it: `dispose()`. Disposal releases every resource the instance owns, unsubscribes every observer the instance itself registered, and notifies every external integration that was holding a back-reference. After disposal the instance is terminal — every public operation except `dispose()`, `isDisposed`, and `isDisposing` throws `DisposedError`. No operation returns the instance to live state. Callers who need to continue monitoring a context window must construct a new instance (and, if state preservation matters, call `snapshot()` before disposal and `fromSnapshot()` after).
+This spec introduces an explicit terminal state for context-lens instances and the operation that transitions to it: `dispose()`. Disposal releases every resource the instance owns, unsubscribes every observer the instance itself registered, and notifies every external integration that was holding a back-reference. After disposal the instance is terminal — every public operation except `dispose()`, `isDisposed`, `isDisposing`, and `instanceId` throws `DisposedError`. No operation returns the instance to live state. Callers who need to continue monitoring a context window must construct a new instance (and, if state preservation matters, call `snapshot()` before disposal and `fromSnapshot()` after).
 
 ### Resolution of the "no explicit disposal" invariant
 
@@ -38,7 +38,7 @@ cl-spec-007 §11 formerly stated:
 
 > context-lens instances require no explicit disposal. All resources (caches, history buffers, event handlers) are released when the instance is garbage collected.
 
-This spec supersedes that statement. The invariant is inverted: long-lived callers **must** call `dispose()` to release resources, and short-lived callers **may** call it to release resources earlier than GC would. The full method catalog, error model, and event system documented in cl-spec-007 are extended (not replaced) by the behavior defined here — the public method catalog gains `dispose()`, `isDisposed`, and `isDisposing` (sections 2.5, 3.1); every other public method gains a post-disposal behavior (section 5); the error hierarchy gains `DisposedError` and `DisposalError` (section 7.2); and the event list gains `stateDisposed` (section 7.1).
+This spec supersedes that statement. The invariant is inverted: long-lived callers **must** call `dispose()` to release resources, and short-lived callers **may** call it to release resources earlier than GC would. The full method catalog, error model, and event system documented in cl-spec-007 are extended (not replaced) by the behavior defined here — the public method catalog gains `dispose()`, `isDisposed`, `isDisposing`, and `instanceId` (sections 2.5, 3.1); every other public method gains a post-disposal behavior (section 5); the error hierarchy gains `DisposedError` and `DisposalError` (section 7.2); and the event list gains `stateDisposed` (section 7.1).
 
 ### What disposal is
 
@@ -82,7 +82,7 @@ The terminal state. An instance enters disposed when `dispose()` completes succe
 
 While disposed:
 
-- Every public method except `dispose()`, `isDisposed`, and `isDisposing` throws `DisposedError` (section 7.2).
+- Every public method except `dispose()`, `isDisposed`, `isDisposing`, and `instanceId` throws `DisposedError` (section 7.2).
 - Caches, ledger, and ring buffers are cleared and dereferenced — internal references are released so the host runtime can collect them once the caller drops their handle to the instance.
 - Every handler previously registered through `on()` is removed from the registry, after the final `stateDisposed` event has been delivered.
 - External integrations have been notified (section 6) and the instance is unsubscribed from any callback it registered with them.
@@ -95,7 +95,7 @@ The lifecycle graph has exactly three arcs:
 | From | To | Trigger | Observable effect |
 |------|----|---------|-------------------|
 | (none) | live | `new ContextLens(...)` returns | Instance is usable. |
-| live | disposed | `dispose()` completes successfully | Final `stateDisposed` event emitted; subsequent calls (other than `dispose`, `isDisposed`, and `isDisposing`) throw `DisposedError`. |
+| live | disposed | `dispose()` completes successfully | Final `stateDisposed` event emitted; subsequent calls (other than `dispose`, `isDisposed`, `isDisposing`, and `instanceId`) throw `DisposedError`. |
 | disposed | disposed | `dispose()` called again | No-op. No event, no teardown, no error. |
 
 Two transitions are explicitly absent and will not be added:
@@ -113,18 +113,19 @@ The implication for callers: the question "is this instance disposed?" always ha
 
 ### 2.5 Querying the state
 
-This spec adds two read-only getters to the public API:
+This spec adds three read-only getters to the public API:
 
 ```ts
 readonly isDisposed: boolean
 readonly isDisposing: boolean
+readonly instanceId: string
 ```
 
-`isDisposed` returns `true` once the live → disposed transition has completed (the disposed flag set in step 6 of teardown, §4.1) and `false` otherwise. `isDisposing` returns `true` while a `dispose()` call is on the stack — between step 1 (the disposing flag set) and the originating call's return (success or, in future amendments, failure) — and `false` otherwise. Both getters never throw; alongside `dispose()` itself, they are the operations that remain valid in all states.
+`isDisposed` returns `true` once the live → disposed transition has completed (the disposed flag set in step 6 of teardown, §4.1) and `false` otherwise. `isDisposing` returns `true` while a `dispose()` call is on the stack — between step 1 (the disposing flag set) and the originating call's return (success or, in future amendments, failure) — and `false` otherwise. `instanceId` returns the instance's stable identifier — the same string carried by the `stateDisposed` event payload (§7.1), by `DisposedError` messages (§7.2), and by integration teardown notifications (§6.2). It is generated once at construction and never changes. All three getters never throw; alongside `dispose()` itself, they are the four operations that remain valid in all lifecycle states.
 
-The two getters are mutually exclusive at any inspection point: at most one is true, and both are false during normal live operation. The two-state lifecycle (§2.1, §2.2) is preserved — `isDisposing` exposes a transient observable on the live → disposed transition, not a third state in the lifecycle graph.
+`isDisposed` and `isDisposing` are mutually exclusive at any inspection point: at most one is true, and both are false during normal live operation. The two-state lifecycle (§2.1, §2.2) is preserved — `isDisposing` exposes a transient observable on the live → disposed transition, not a third state in the lifecycle graph. `instanceId` is constant across all states; it is metadata, not lifecycle state.
 
-`isDisposed` is the predicate for "is this instance terminal?" — used to decide whether to invoke methods that need post-disposal recovery semantics. `isDisposing` is the predicate for "should I avoid mutating methods right now?" — used by handlers and integration callbacks running during teardown to gate their own mutation calls. Library-internal code uses both: every mutating public method's throw guard fires on `isDisposing || isDisposed`; every read-only public method's throw guard fires on `isDisposed` only (the read-only-during-disposal rule, §3.4). No mirror getter `isLive` is provided — `!isDisposed && !isDisposing` is unambiguous.
+`isDisposed` is the predicate for "is this instance terminal?" — used to decide whether to invoke methods that need post-disposal recovery semantics. `isDisposing` is the predicate for "should I avoid mutating methods right now?" — used by handlers and integration callbacks running during teardown to gate their own mutation calls. `instanceId` is the correlation key for cross-cutting observability — fleet aggregators (cl-spec-012), OpenTelemetry exporters (cl-spec-013), logs, traces, and caller-side telemetry all use it to tie events on the same instance together across systems. Library-internal code uses the two flag getters: every mutating public method's throw guard fires on `isDisposing || isDisposed`; every read-only public method's throw guard fires on `isDisposed` only (the read-only-during-disposal rule, §3.4). No mirror getter `isLive` is provided — `!isDisposed && !isDisposing` is unambiguous.
 
 ---
 
@@ -204,7 +205,7 @@ The mutation-throw rule during `stateDisposed` is **stricter than the general ha
 The synchronous contract has two consequences callers must understand:
 
 - **Provider teardown is the caller's responsibility.** If the tokenizer or embedding provider (cl-spec-007) holds external resources — network connection pools, worker threads, subprocess handles — the caller must shut those down after `dispose()` returns. The library never `await`s a provider shutdown hook, because doing so would force `dispose()` to be async, and async disposal in turn would force every caller of every method to reason about an "is this instance still being torn down?" race. The library elects to push provider shutdown to the caller rather than absorb that complexity. Section 6 documents the recommended caller pattern.
-- **Microtasks scheduled during teardown run after `dispose()` returns.** Any handler that schedules a microtask (`queueMicrotask`, `Promise.resolve().then(...)`) during `stateDisposed` has that microtask drained on the same turn of the event loop, after `dispose()` returns and the instance is fully disposed. Callbacks deferred this way must not call back into the instance — by the time they run, every public method except `dispose()`, `isDisposed`, and `isDisposing` will throw `DisposedError`.
+- **Microtasks scheduled during teardown run after `dispose()` returns.** Any handler that schedules a microtask (`queueMicrotask`, `Promise.resolve().then(...)`) during `stateDisposed` has that microtask drained on the same turn of the event loop, after `dispose()` returns and the instance is fully disposed. Callbacks deferred this way must not call back into the instance — by the time they run, every public method except `dispose()`, `isDisposed`, `isDisposing`, and `instanceId` will throw `DisposedError`.
 
 ### 3.6 Return value and error path
 
@@ -221,7 +222,7 @@ On the failure path, `dispose()` throws. The thrown error is propagated to the c
 3. Notify external integrations (fleet aggregators, OpenTelemetry exporters) that the instance is going away, so they can drop their back-references.
 4. Clear and dereference internal caches, the continuity ledger, and the report and timeline ring buffers.
 5. Detach the event handler registry.
-6. Mark the instance as disposed (`isDisposing` returns `false`, `isDisposed` returns `true`); subsequent calls to any public method except `dispose()`, `isDisposed`, and `isDisposing` throw `DisposedError`.
+6. Mark the instance as disposed (`isDisposing` returns `false`, `isDisposed` returns `true`); subsequent calls to any public method except `dispose()`, `isDisposed`, `isDisposing`, and `instanceId` throw `DisposedError`.
 
 The order matters: subscribers must receive `stateDisposed` while the registry is still intact (step 5 follows step 2), and external integrations must learn of the disposal before the instance's owned resources are cleared (step 3 precedes step 4) so they do not observe a half-dismantled instance through their own back-references. Section 4 explains why each ordering constraint exists and how it is enforced.
 
@@ -242,7 +243,7 @@ Three invariants drive the sequence's design. First, every event subscriber regi
 | 3 | Notify external integrations — fleet aggregators (cl-spec-012) and OpenTelemetry exporters (cl-spec-013) — that the instance is going away, and unsubscribe from any callbacks the instance registered with them. The per-integration callback contract is specified in section 6. | Integration tables (read-write). | Integration teardown callbacks run as a side effect. | Yes — callback may throw |
 | 4 | Clear and dereference the instance's owned resources: the segment store, the continuity ledger (cl-spec-002 §6), the token cache (cl-spec-006 §5), the embedding cache (cl-spec-005 §5), the similarity cache, and the report and timeline ring buffers (cl-spec-010). Internal references to these structures are nulled so the host runtime can collect them once the caller drops the instance handle. From this point onward, read-only methods that depend on cleared state would observe empty results — but step 6 has not yet flipped the disposed flag, so the throw guard still uses the during-disposal rule. | Owned data structures (clear and null). | — | No |
 | 5 | Detach the event handler registry. Discard every entry, including any handler that re-registered itself during step 2 (§3.4). | Registry (clear and null). | — | No |
-| 6 | Clear the disposing flag and set the disposed flag. `isDisposing` returns `false` and `isDisposed` (§2.5) returns `true`. Subsequent calls to any public method other than `dispose()`, `isDisposed`, and `isDisposing` throw `DisposedError` (§7.2). | Lifecycle flags (write). | — | No |
+| 6 | Clear the disposing flag and set the disposed flag. `isDisposing` returns `false` and `isDisposed` (§2.5) returns `true`. `instanceId` continues to return its constant value. Subsequent calls to any public method other than `dispose()`, `isDisposed`, `isDisposing`, and `instanceId` throw `DisposedError` (§7.2). | Lifecycle flags (write). | — | No |
 
 Steps 1, 4, 5, and 6 are library-internal: they execute deterministic primitive operations on data the library exclusively owns (flag assignment, `Map.clear()`, array reset, reference nulling) and have no execution path that fails under the JavaScript runtime guarantees the library depends on. Steps 2 and 3 dispatch into caller-supplied code (event handlers) or integration code (fleet and exporter callbacks) and inherit that code's failure surface; their error handling is the subject of §4.3.
 
@@ -303,15 +304,16 @@ Section 5.1 specifies how public methods dispatch on a disposed instance. Sectio
 
 ### 5.1 Public method dispatch
 
-Every public method on the instance except `dispose()`, `isDisposed`, and `isDisposing` throws `DisposedError` (§7.2) when invoked on a disposed instance. The rule is uniform across all method categories: queries, mutations, assessments, planning, subscription, persistence. A `getCapacity()` call that would have returned a number on the live instance throws on the disposed one. An `add()` call that would have failed validation on the live instance throws. A `snapshot()` call (cl-spec-014) that would have produced a serializable description of the instance's accumulated state throws — there is no accumulated state left to snapshot. The throw is unconditional and synchronous: the disposed-state guard runs at the top of every public method, ahead of argument validation, cache lookups, and any side effect.
+Every public method on the instance except `dispose()`, `isDisposed`, `isDisposing`, and `instanceId` throws `DisposedError` (§7.2) when invoked on a disposed instance. The rule is uniform across all method categories: queries, mutations, assessments, planning, subscription, persistence. A `getCapacity()` call that would have returned a number on the live instance throws on the disposed one. An `add()` call that would have failed validation on the live instance throws. A `snapshot()` call (cl-spec-014) that would have produced a serializable description of the instance's accumulated state throws — there is no accumulated state left to snapshot. The throw is unconditional and synchronous: the disposed-state guard runs at the top of every public method, ahead of argument validation, cache lookups, and any side effect.
 
 The post-disposal rule contrasts with the during-disposal rule (§3.4). While `isDisposing === true`, read-only methods behave per their live specification because their backing state is intact; only mutating methods throw. Once the disposed flag is set in step 6 of teardown, that backing state has been cleared in step 4, so reads have nothing to return — they throw alongside the mutations.
 
-The three methods that remain valid post-disposal:
+The four methods that remain valid post-disposal:
 
 - **`dispose()`** — calling it on a disposed instance is a no-op per §3.3. It does not throw, does not emit `stateDisposed`, and does not re-run teardown.
 - **`isDisposed`** — returns `true`. The getter never throws.
-- **`isDisposing`** — returns `false`. The getter never throws. Together with `isDisposed`, the two getters are the predicates external integrations and caller-supplied health checks use to decide whether to invoke other methods (§2.5).
+- **`isDisposing`** — returns `false`. The getter never throws. Together with `isDisposed`, the two flag getters are the predicates external integrations and caller-supplied health checks use to decide whether to invoke other methods (§2.5).
+- **`instanceId`** — returns the instance's stable identifier, the same value it returned during the live and disposing phases. The getter never throws. It is the correlation key for cross-system telemetry that may need to reference the disposed instance after the fact (audit logs that enumerate disposed instances by id, post-mortem trace assembly, etc.).
 
 Unsubscribe handles returned by `on()` (cl-spec-007 §9) before disposal remain callable afterward. Calling such a handle on a disposed instance is a no-op. The justification is not that the handle is somehow exempt from the disposed-state guard — it is that the unsubscribe handle's contract is **intrinsically idempotent**: it removes the registered handler if it is still registered, otherwise it is a no-op. Disposal makes the handler not-present (the registry was detached in step 5 of teardown), so the no-op branch fires by construction. This is the unsubscribe contract executing normally on a state where the handler is gone, not an exception to the disposed-state guard.
 
@@ -324,7 +326,8 @@ Read methods do not share this property — they have no natural no-op return va
 A disposed instance retains only the metadata required to:
 
 1. Answer subsequent `isDisposed` and `isDisposing` queries, via the lifecycle flags maintained in step 6 of teardown (§4.1).
-2. Identify itself in `DisposedError` messages raised by post-disposal method calls (§7.2).
+2. Answer subsequent `instanceId` queries — the identifier is constant and survives disposal as part of the retained metadata.
+3. Identify itself in `DisposedError` messages raised by post-disposal method calls (§7.2).
 
 Everything else has been cleared and dereferenced in step 4 of teardown: the segment store, the continuity ledger (cl-spec-002 §6), the token cache (cl-spec-006 §5), the embedding cache (cl-spec-005 §5), the similarity cache, and the report and timeline ring buffers (cl-spec-010). The handler registry has been detached in step 5. External integration back-references have been removed in step 3.
 
@@ -569,13 +572,15 @@ Neither error is delivered through the event system. Per §3.6, `dispose()` repo
 
 **Invariant 10: Caller-callback errors do not abort teardown.** Errors thrown by `stateDisposed` handlers (step 2) and by integration teardown callbacks (step 3) are caught, aggregated into a per-call disposal error log, and surfaced as a single `DisposalError` after step 6. They never abort teardown, never roll back the live → disposed transition, and never cause a step to be skipped. Disposal completes regardless of how many callbacks throw; the instance is fully disposed at the moment `DisposalError` is raised (§4.3, §6.2, §7.2).
 
-**Invariant 11: DisposedError gates the disposed-state and during-disposal-mutation guards.** Every public method on a disposed instance other than `dispose()`, `isDisposed`, and `isDisposing` throws `DisposedError`. The post-disposal throw is uniform across all method categories — queries, mutations, assessments, planning, subscription, persistence — because backing state has been cleared in step 4 of teardown. Additionally, mutating public methods invoked during disposal (between step 1 and step 6, while `isDisposing === true`) throw `DisposedError`; read-only methods continue to behave per their live specification during disposal because their backing state is intact. Both throws are synchronous and occur before any side effect of the called method — no argument validation, no cache lookup, no event emission (§3.4, §5.1, §7.2).
+**Invariant 11: DisposedError gates the disposed-state and during-disposal-mutation guards.** Every public method on a disposed instance other than `dispose()`, `isDisposed`, `isDisposing`, and `instanceId` throws `DisposedError`. The post-disposal throw is uniform across all method categories — queries, mutations, assessments, planning, subscription, persistence — because backing state has been cleared in step 4 of teardown. Additionally, mutating public methods invoked during disposal (between step 1 and step 6, while `isDisposing === true`) throw `DisposedError`; read-only methods continue to behave per their live specification during disposal because their backing state is intact. Both throws are synchronous and occur before any side effect of the called method — no argument validation, no cache lookup, no event emission (§3.4, §5.1, §7.2).
 
-**Invariant 12: Constant-sized retained metadata.** A disposed instance retains only the metadata needed to answer subsequent `isDisposed` queries and to identify itself in `DisposedError` messages — a flag and an identifier. The retained-metadata footprint is constant regardless of the instance's pre-disposal size: a disposed instance that previously held 10,000 segments occupies the same per-instance footprint as one that previously held 10 (§5.2).
+**Invariant 12: Constant-sized retained metadata.** A disposed instance retains only the metadata needed to answer subsequent `isDisposed`, `isDisposing`, and `instanceId` queries and to identify itself in `DisposedError` messages — two flags and an identifier. The retained-metadata footprint is constant regardless of the instance's pre-disposal size: a disposed instance that previously held 10,000 segments occupies the same per-instance footprint as one that previously held 10 (§5.2).
 
 **Invariant 13: Provider lifecycle is caller-managed.** Tokenizer (cl-spec-006) and embedding (cl-spec-005) providers passed to the constructor are not lifecycle-aware integrations. The library does not register a teardown callback with them, does not call any "shutdown" method on them during `dispose()`, and does not consider them part of step 3. Provider lifecycle is fully caller-owned; the recommended pattern is to call `dispose()` first (releasing the library's references) and then await any provider shutdown hooks (§3.5, §6.5).
 
 **Invariant 14: Integration callbacks exactly once.** Each lifecycle-aware integration registered with the instance — fleet aggregators (cl-spec-012), OpenTelemetry exporters (cl-spec-013) — receives its teardown callback exactly once per disposal, during step 3, with `isDisposed === false`, `isDisposing === true`, and the instance's read-only API available. Within the callback, the integration must drop its back-reference, detach any callbacks it registered with the instance, and complete deferred work that depends on live state; it must not invoke mutating methods (they throw `DisposedError` per the read-only-during-disposal rule), re-attach, or expect throws to abort disposal (§6.2, §6.3, §6.4).
+
+**Invariant 15: Stable instanceId across all states.** `instanceId` is generated once at construction and returns the same string value throughout the instance's existence in memory — across `live`, `disposing`, and `disposed` states. The getter never throws. The value matches the identifier carried by `stateDisposed` event payloads (§7.1), `DisposedError` (§7.2), and integration teardown notifications (§6.2), making `instanceId` the canonical correlation key for telemetry that needs to tie events on the same instance together (§2.5).
 
 ---
 

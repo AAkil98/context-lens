@@ -460,9 +460,15 @@ Add to the OTel log event catalog (cl-spec-013 §4.1) and the test assertions fo
 
 ### 4.7 ContextLens.instanceId getter
 
-A small public getter `instanceId(): string` (or `readonly instanceId: string`) is added to support fleet/exporter callbacks that need to read the identifier from inside a teardown callback. The getter is exempt from the disposed-state guard (it is a metadata accessor, not a state-dependent operation). It is documented in `cl-spec-007` §9 as a fourth always-valid surface alongside `dispose`, `isDisposed`, `isDisposing`.
+```ts
+readonly instanceId: string
+```
 
-> **Spec alignment note:** cl-spec-007 §9 currently lists three always-valid methods. The `instanceId` getter is a small extension — propose adding it to cl-spec-015 §2.5 and cl-spec-007 §9 in a follow-up amendment, or fold it into the `stateDisposed` payload + `DisposedError` field as the only disclosure path. The implementation as drafted assumes the getter is added; if the amendment is rejected, integrations read the id from the `stateDisposed` payload they receive (less ergonomic but feasible).
+The fourth always-valid public surface alongside `dispose`, `isDisposed`, `isDisposing` (cl-spec-007 §9.4, cl-spec-015 §2.5). Generated once in the constructor as a short URL-safe string of the form `cl-${counter}-${randomBase36}` — counter is a process-wide monotonic, randomBase36 is a 6-character random suffix from `Math.random().toString(36).slice(2, 8)`. The combination guarantees uniqueness within a process across all live and disposed instances.
+
+The getter is exempt from the disposed-state guard. The retained-metadata footprint of a disposed instance includes the identifier (cl-spec-015 §5.2, Invariant 12) so the getter continues to return the correct value indefinitely after disposal. Implementation: the field is `readonly` on the class (assigned in the constructor) and the disposed-state guard skips reading it. No special-case logic in `guardDispose` — `instanceId` is simply not a method, so the guard never sees it.
+
+The same value flows to the `stateDisposed` event payload (built in step 1 of teardown), `DisposedError.instanceId` (constructed by the disposed-state guard), and integration teardown callbacks (passed via the `IntegrationTeardown` callback signature, which receives the live instance and can read the getter). All four surfaces return string-equal values for the same instance.
 
 ---
 

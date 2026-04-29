@@ -74,7 +74,7 @@ The public API is organized into twelve categories:
 | **Capacity and inspection** | Query window state without scoring | `getCapacity`, `setCapacity`, `getSegment`, `listSegments`, `getSegmentCount`, `getEvictionHistory` |
 | **Diagnostics** | Inspect internal state | `getDiagnostics` |
 | **Eviction planning** | Produce advisory eviction plans | `planEviction` |
-| **Lifecycle** | Transition the instance to its terminal state and probe lifecycle state | `dispose`, `isDisposed`, `isDisposing` |
+| **Lifecycle** | Transition the instance to its terminal state and probe lifecycle state and identity | `dispose`, `isDisposed`, `isDisposing`, `instanceId` |
 
 An **event system** (section 10) provides lifecycle hooks. An **error model** (section 11) defines failure modes.
 
@@ -1027,9 +1027,9 @@ See cl-spec-008 for the complete EvictionPlan structure and ranking algorithm.
 
 ## 9. Lifecycle
 
-context-lens instances have an explicit terminal state. The methods documented in this section transition an instance to that state and let callers probe its current state. The full behavioral contract — teardown sequence, atomicity, failure model, integration callbacks, error semantics, and per-method dispatch rules during and after disposal — is specified by cl-spec-015. This section summarizes the public surface; cl-spec-015 governs behavior.
+context-lens instances have an explicit terminal state. The methods documented in this section transition an instance to that state and let callers probe its current state and identity. The full behavioral contract — teardown sequence, atomicity, failure model, integration callbacks, error semantics, and per-method dispatch rules during and after disposal — is specified by cl-spec-015. This section summarizes the public surface; cl-spec-015 governs behavior.
 
-The three lifecycle methods (`dispose`, `isDisposed`, `isDisposing`) are the only public methods that remain valid after disposal. Every other public method on a disposed instance throws `DisposedError` (section 11.1). Mutating public methods invoked while disposal is in progress (`isDisposing === true`) also throw `DisposedError` per the read-only-during-disposal rule (cl-spec-015 §3.4).
+The four lifecycle members (`dispose`, `isDisposed`, `isDisposing`, `instanceId`) are the only public surfaces that remain valid after disposal. Every other public method on a disposed instance throws `DisposedError` (section 11.1). Mutating public methods invoked while disposal is in progress (`isDisposing === true`) also throw `DisposedError` per the read-only-during-disposal rule (cl-spec-015 §3.4).
 
 ### 9.1 dispose
 
@@ -1068,6 +1068,16 @@ Returns `true` while a `dispose()` call is on the stack — between the start of
 The predicate for "should I avoid mutating methods right now?" — used by `stateDisposed` handlers and integration teardown callbacks to gate their own mutation calls (cl-spec-015 §2.5). During disposal, mutating public methods throw `DisposedError` per the read-only-during-disposal rule; read-only methods behave per their live specification until backing state is cleared.
 
 `isDisposed` and `isDisposing` are mutually exclusive — at most one is true at any inspection point. Both are false during normal live operation.
+
+### 9.4 instanceId
+
+```
+readonly instanceId: string
+```
+
+Returns the instance's stable identifier. Generated once at construction, returns the same value throughout the instance's existence in memory — across `live`, `disposing`, and `disposed` states. Never throws. Remains valid in all lifecycle states.
+
+The value matches the identifier carried by the `stateDisposed` event payload (section 10.2), the `DisposedError.instanceId` field (section 11.1), and integration teardown notifications (cl-spec-012 §7, cl-spec-013 §2.1.2). It is the canonical correlation key for cross-system telemetry — fleet aggregators, OpenTelemetry exporters, application logs, and external trace collectors use it to tie events on the same instance together. The format is implementation-defined but is guaranteed to be a non-empty string and unique within a process across all live and disposed instances; instances disposed earlier in the process retain their identifier so callers correlating against historical telemetry continue to find it valid (cl-spec-015 §2.5, Invariant 15).
 
 ---
 
@@ -1191,7 +1201,7 @@ The lifecycle errors are not assigned `code` strings — they are distinguished 
 
 1. **Atomic failure.** If a method throws, no observable state has changed. The instance is in the same state as before the call. This applies to all segment operations, group operations, and task operations. Provider switches are the one exception: a mid-switch embedding failure results in trigram fallback rather than rollback (section 7.2). `dispose()` is also an exception: when it throws `DisposalError` after caller-supplied callbacks errored, the instance has already transitioned to disposed and the error is informational (cl-spec-015 §4.3).
 2. **No silent failures.** context-lens does not swallow errors and return partial results. If token counting fails for one segment in a `seed` batch, the entire batch fails. The caller always knows whether an operation succeeded or not.
-3. **Predictable types.** Every public method documents which error types it can throw. A method that documents `SegmentNotFoundError` and `ProtectionError` will only throw those types (plus `ProviderError` if the operation triggers token counting or embedding). Callers can write exhaustive catch blocks. Every public method other than `dispose`, `isDisposed`, and `isDisposing` additionally throws `DisposedError` when invoked on a disposed instance, and mutating methods additionally throw `DisposedError` when invoked during disposal — these are universal post/during-disposal guards documented globally rather than per-method (cl-spec-015 §5.1, §3.4).
+3. **Predictable types.** Every public method documents which error types it can throw. A method that documents `SegmentNotFoundError` and `ProtectionError` will only throw those types (plus `ProviderError` if the operation triggers token counting or embedding). Callers can write exhaustive catch blocks. Every public method other than `dispose`, `isDisposed`, `isDisposing`, and `instanceId` additionally throws `DisposedError` when invoked on a disposed instance, and mutating methods additionally throw `DisposedError` when invoked during disposal — these are universal post/during-disposal guards documented globally rather than per-method (cl-spec-015 §5.1, §3.4).
 
 ---
 
@@ -1219,7 +1229,7 @@ The following invariants hold across all public API operations. They extend and 
 
 **Read-only consumer contract.** Consumer modules (eviction advisory, diagnostics, fleet monitor, observability exporter) do not call segment-mutating methods (`add`, `update`, `replace`, `compact`, `split`, `evict`, `restore`) or configuration-mutating methods (`setTask`, `clearTask`, `setTokenizer`, `setEmbeddingProvider`). They may call `assess()`, which updates internal caches but does not modify segments or configuration.
 
-**Instance lifecycle.** context-lens instances have an explicit terminal state and the `dispose()` method that transitions to it (section 9, cl-spec-015). Long-lived callers (monitoring daemons, multi-agent orchestrators, server processes handling rolling contexts) **must** call `dispose()` to release event handlers, caches, history buffers, and external integration back-references — garbage collection alone is insufficient because event subscribers and integrations hold strong references that prevent GC. Short-lived callers **may** call `dispose()` to release resources earlier than GC would. After `dispose()` returns, `isDisposed === true` and every public method except `dispose`, `isDisposed`, and `isDisposing` throws `DisposedError`. The full lifecycle contract — teardown sequence, atomicity, integration callbacks, error semantics — is specified by cl-spec-015. This invariant supersedes the prior "no explicit disposal" claim that this section formerly carried.
+**Instance lifecycle.** context-lens instances have an explicit terminal state and the `dispose()` method that transitions to it (section 9, cl-spec-015). Long-lived callers (monitoring daemons, multi-agent orchestrators, server processes handling rolling contexts) **must** call `dispose()` to release event handlers, caches, history buffers, and external integration back-references — garbage collection alone is insufficient because event subscribers and integrations hold strong references that prevent GC. Short-lived callers **may** call `dispose()` to release resources earlier than GC would. After `dispose()` returns, `isDisposed === true` and every public method except `dispose`, `isDisposed`, `isDisposing`, and `instanceId` throws `DisposedError`. The full lifecycle contract — teardown sequence, atomicity, integration callbacks, error semantics — is specified by cl-spec-015. This invariant supersedes the prior "no explicit disposal" claim that this section formerly carried.
 
 **Single-threaded access.** context-lens assumes single-threaded, sequential access. Concurrent calls from multiple async contexts produce undefined behavior. Callers in async environments must serialize access to each instance. Re-entrant calls from event handlers are also prohibited (section 10.3).
 

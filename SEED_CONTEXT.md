@@ -127,12 +127,13 @@ Amendment complete: `snapshot()`/`fromSnapshot()` added after cl-spec-014 (Seria
 Further amendment during implementation: `reportGenerated` and `budgetViolation` added. 24 events total.
 
 Lifecycle amendment (2026-04-29) — cl-spec-015 integration:
-- New §9 "Lifecycle" section added (between Capacity/Inspection and Event System). Documents `dispose()`, `isDisposed`, `isDisposing` with cross-references to cl-spec-015 for the full contract.
+- New §9 "Lifecycle" section added (between Capacity/Inspection and Event System). Documents `dispose()`, `isDisposed`, `isDisposing`, `instanceId` with cross-references to cl-spec-015 for the full contract.
 - §10.2 events catalog grew from 24 to 25: added `stateDisposed`.
 - §10.3 handler contract gained a paragraph documenting the deliberate deviation for `stateDisposed` handlers — read-only-during-disposal rule, errors aggregated into `DisposalError`. The deviation is justified on disposal's one-shot terminal nature.
 - §11.1 error hierarchy: `DisposedError` and `DisposalError` added as native-Error and AggregateError subclasses respectively (do not extend `ContextLensError` — see cl-spec-015 §7.2 for rationale).
 - §12 invariants: the prior "Instance lifecycle" paragraph that asserted "no explicit disposal required" is replaced — long-lived callers must now `dispose()`, short-lived callers may.
 - Sections renumbered: Event System §9 → §10, Error Model §10 → §11, Invariants §11 → §12, References §12 → §13. TOC updated. Internal cross-references updated.
+- Post-grill addendum (during impl-spec drafting): §9.4 added for the `instanceId` getter (fourth always-valid public surface, alongside `dispose`, `isDisposed`, `isDisposing`). Disposed-state-guard exemption list updated wherever it appears in §1, §9, §11.3, §12.
 - Status flipped from `draft (amended)` to `complete`.
 
 **Spec 8 (Eviction Advisory) is draft (amended):** `specs/08-eviction-advisory.md`
@@ -258,13 +259,14 @@ Key decisions made in Spec 15:
 - Lifecycle-aware integrations (fleets cl-spec-012, OTel exporters cl-spec-013) receive teardown callback in step 3 with `isDisposed === false` and full read access to live state. Must drop back-reference, detach own handlers, complete deferred work (final aggregated report, final OTel signal flush); must not mutate, re-attach, or throw to abort.
 - Providers (tokenizer cl-spec-006, embedder cl-spec-005) are caller-managed — not notified by `dispose()`, not part of step 3. Synchronous `dispose()` deliberately excludes async provider hooks. Recommended pattern: `dispose()` first (releases library's references so no library code can re-invoke a provider), then await provider shutdowns.
 - Supersedes the "no explicit disposal" invariant from cl-spec-007 §11. Long-lived callers (monitoring daemons, multi-agent orchestrators, server processes handling rolling contexts) must dispose; short-lived may dispose to release resources earlier than GC. Retained metadata after disposal is constant-sized (just a flag + instanceId for DisposedError messages) — does not grow with pre-disposal state.
-- 14 numbered invariants covering state machine, dispose contract, teardown atomicity, post-disposal access, events and errors, and integrations/providers.
+- 15 numbered invariants covering state machine, dispose contract, teardown atomicity, post-disposal access, events and errors, integrations/providers, and stable identity (`instanceId`).
 
 Grill outcomes (2026-04-29) — three decisions applied to the spec; status flipped to `complete`:
 - **GD-01: Read-only-during-disposal rule.** Resolved §3.4 vs §6.2 asymmetry. Between step 1 and step 6, read-only methods behave per live spec; mutating methods throw `DisposedError`. Same rule applies uniformly to step-2 handlers and step-3 integration callbacks. The wrong "caches non-deterministic" rationale in §3.4 was replaced.
 - **GD-02: `isDisposing` getter added.** Sibling to `isDisposed`. True while `dispose()` is on the stack, false otherwise. Mutually exclusive with `isDisposed`. Lifecycle graph stays two-state — `isDisposing` is a transient observable, not a third state. Library-internal mutation gate now fires on `isDisposing || isDisposed`.
 - **GD-03: Unsubscribe handle no-op rejustified.** Closure pattern verified in cl-spec-007 §9.1 (`on()` returns `Unsubscribe`). Old "not a public method" rationale dropped; replaced with "intrinsically idempotent contract" framing — disposal makes the handler not-present, so the no-op branch fires by construction.
 - Friction #4 also resolved: documented the deviation from cl-spec-007 §9.3's general handler contract (mutations throw vs undefined behavior; handler errors aggregated via `DisposalError` vs swallowed-and-logged) in §3.4 and §4.3.
+- Post-grill addendum (during impl-spec drafting): `instanceId: string` added as a fourth always-valid public surface. Generated once at construction, returned unchanged across live/disposing/disposed states, never throws. Same value as the `stateDisposed` event payload, `DisposedError.instanceId`, and integration teardown notifications. Canonical correlation key for cross-system telemetry. Documented in cl-spec-015 §2.5 and Invariant 15, and in cl-spec-007 §9.4. Adds one slot to the disposed-state-guard exemption list across both specs.
 - `revised:` frontmatter updated to 2026-04-29.
 
 ## Current state
