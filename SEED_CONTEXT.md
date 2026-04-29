@@ -215,16 +215,23 @@ Lifecycle amendment (2026-04-29) — cl-spec-015 integration:
 - Sections renumbered: Invariants §7 → §8, References §8 → §9. TOC updated.
 - Status flipped from `draft` to `complete`.
 
-**Spec 13 (Observability Export) is draft:** `specs/13-observability-export.md`
+**Spec 13 (Observability Export) is complete:** `specs/13-observability-export.md`
 
 Key decisions made in Spec 13:
 - ContextLensExporter: optional OTel peer dependency, separate entry point (context-lens/otel), read-only consumer
 - 9 gauges (quality dimensions, utilization, segment count, headroom, pattern count), 6 counters (evictions, compactions, restorations, pattern activations, assessments, task changes), 1 histogram (assess duration)
-- 5 OTel log event types: pattern activated/resolved, task changed, capacity warning, budget violation
+- 6 OTel log event types: pattern activated/resolved, task changed, capacity warning, budget violation, instance disposed (added in lifecycle amendment)
 - Common attributes: window label, tokenizer name, embedding mode
 - Push on assess: metrics updated inline on each assess() via event subscription, no polling
 - Convention-based naming: `context_lens.*` prefix, OTel semantic conventions
-- 6 invariants including read-only consumer, optional dependency, metric naming stability
+- 9 invariants including read-only consumer, optional dependency, metric naming stability, auto-disconnect on instance disposal, disposed-instance rejection at construction, at-most-once final flush
+
+Lifecycle amendment (2026-04-29) — cl-spec-015 integration:
+- Exporter declared a lifecycle-aware integration of the monitored instance (cl-spec-015 §6).
+- §2.1 Lifecycle expanded with two subsections: §2.1.1 Explicit disconnect (`disconnect()`), §2.1.2 Auto-disconnect on instance disposal (teardown callback during step 3 of `dispose()`).
+- New event `context_lens.instance.disposed` added to §4.1 with attributes `instance.id`, `instance.final_composite`, `instance.final_utilization`.
+- Recommended pattern documented: do the final-signal flush in the step-3 callback, not in a `stateDisposed` step-2 handler — avoids duplicate flush.
+- Status flipped from `draft` to `complete`.
 
 **Spec 15 (Instance Lifecycle) is complete (post-grill):** `specs/15-instance-lifecycle.md`
 
