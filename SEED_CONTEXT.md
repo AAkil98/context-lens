@@ -195,16 +195,25 @@ Key decisions made in Spec 14:
 - Format versioning: "context-lens-snapshot-v1", independent of schema version, forward+backward compatible
 - 8 invariants including snapshot equivalence, round-trip fidelity, atomic restore, content completeness
 
-**Spec 12 (Fleet Monitor) is draft:** `specs/12-fleet-monitor.md`
+**Spec 12 (Fleet Monitor) is complete:** `specs/12-fleet-monitor.md`
 
 Key decisions made in Spec 12:
 - OQ-011 resolved: fresh assessment by default (`assessFleet()` calls `assess()` on each instance), cached mode opt-in via `{ cached: true }`
 - ContextLensFleet class: register/unregister instances by label, assessFleet → FleetReport
 - FleetReport: per-instance reports, fleet-wide aggregates (mean/min/max/stddev per dimension), degradation hotspots (sorted by severity), comparative ranking (composite ascending), fleet capacity overview
-- Fleet events: instanceDegraded, instanceRecovered, fleetDegraded (configurable threshold), fleetRecovered
+- Fleet events: instanceDegraded, instanceRecovered, instanceDisposed (added in lifecycle amendment), fleetDegraded (configurable threshold), fleetRecovered
 - Fail-open: one failing instance doesn't break fleet assessment
 - Read-only consumer: fleet calls assess/getCapacity/getSegmentCount, never mutates instances
-- 6 invariants including read-only consumer, instance independence, fail-open assessment
+- 8 invariants including read-only consumer, instance independence, fail-open assessment, auto-unregister on disposal, disposed-instance rejection at registration
+
+Lifecycle amendment (2026-04-29) — cl-spec-015 integration:
+- Fleet declared a lifecycle-aware integration of every registered instance (cl-spec-015 §6).
+- New §7 Instance Disposal Handling: teardown callback behavior, constraints inside callback, auto-unregister vs explicit unregister, polling fallback.
+- New event `instanceDisposed { label, instanceId, finalReport }` fired during step 3 of an instance's teardown — independent of fleet's cached/fresh mode.
+- §3.1 register: documents the lifecycle integration handshake, throws `DisposedError` on already-disposed instances.
+- §3.2 unregister: distinguishes explicit unregister (silent) from auto-unregister (emits `instanceDisposed`).
+- Sections renumbered: Invariants §7 → §8, References §8 → §9. TOC updated.
+- Status flipped from `draft` to `complete`.
 
 **Spec 13 (Observability Export) is draft:** `specs/13-observability-export.md`
 
