@@ -369,6 +369,7 @@ Four sweeps executed across 14 specs. 26 findings (R-165 through R-190). Key res
 - `impl/I-03-detection-advisory.md` — Phase 3: detection framework (5 base patterns, 6 compounds, custom registration), eviction advisory (5-signal ranking, 4 strategies), performance instrumentation (3 modules)
 - `impl/I-04-api-integration.md` — Phase 4: ContextLens class (integration layer), diagnostics, formatters (3 modules)
 - `impl/I-05-enrichments.md` — Phase 5: JSON Schema, serialization, fleet monitor, OTel export (4 modules, all optional)
+- `impl/I-06-lifecycle.md` — Phase 6 (v0.2.0): `dispose()`, `isDisposed`/`isDisposing`, `stateDisposed` event, `DisposedError`/`DisposalError`, `IntegrationRegistry`, fleet auto-unregister, OTel auto-disconnect. New module `lifecycle.ts` plus modifications to `errors`, `events`, `index`, `fleet`, `otel`.
 
 Key technology decisions: TypeScript strict mode, tsup for ESM+CJS dual build, vitest + fast-check for testing (unit, integration, property-based, benchmarks), `@opentelemetry/api` as sole peer dep (OTel entry point only).
 

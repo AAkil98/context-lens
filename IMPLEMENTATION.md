@@ -166,8 +166,9 @@ context-lens/
 | **3** | Detection + advisory + perf | `detection`, `eviction`, `performance` | 03, 08, 09 | `I-03` |
 | **4** | Public API + diagnostics | `index` (ContextLens), `diagnostics`, `formatters` | 07, 10 | `I-04` |
 | **5** | Enrichments | `serialization`, `schemas/*`, `fleet`, `otel` | 11, 12, 13, 14 | `I-05` |
+| **6** | Instance lifecycle (v0.2.0) | `lifecycle`, modifications to `errors`, `events`, `index`, `fleet`, `otel` | 15, 07/12/13/14 amendments | `I-06` |
 
-Each phase produces independently testable modules. No phase ships partial modules.
+Phases 1–5 ship in v0.1.0. Phase 6 is the first v0.2.0 phase; it adds `dispose()`, `isDisposed`, `isDisposing`, the `stateDisposed` event, `DisposedError` / `DisposalError`, and the integration registry that lets fleets and OTel exporters auto-detach on instance disposal. Each phase produces independently testable modules. No phase ships partial modules.
 
 ---
 
@@ -186,7 +187,8 @@ Each phase produces independently testable modules. No phase ships partial modul
 | 09 Performance Budget | `performance`, sampling logic in `scoring/*` | Budget checking in `performance`; sampling thresholds wired into scorers. |
 | 10 Report & Diagnostics | `diagnostics`, `formatters` | History, timeline, formatting. |
 | 11 Report Schema | `schemas/` | JSON Schema files + validation. |
-| 12 Fleet Monitor | `fleet` (sub-path export) | ContextLensFleet class. |
+| 12 Fleet Monitor | `fleet` (sub-path export) | ContextLensFleet class. Phase 6 adds the `instanceDisposed` event and the auto-unregister callback. |
+| 15 Instance Lifecycle | `lifecycle` (internal), modifications to `index`, `errors`, `events`, `fleet`, `otel` | Phase 6 (v0.2.0). Internal `IntegrationRegistry`, `dispose()` orchestrator, disposed-state guard. Touches every module that takes part in teardown. |
 | 13 Observability Export | `otel` (sub-path export) | OTel adapter, peer dep on `@opentelemetry/api`. |
 | 14 Serialization | `serialization` | snapshot/fromSnapshot. |
 
