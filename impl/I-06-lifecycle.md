@@ -155,7 +155,7 @@ Where `TeardownContext` carries: the lifecycle state setter, the emitter, the in
 The orchestrator executes the six steps from cl-spec-015 §4.1 in order:
 
 1. Set lifecycle state to `'disposing'`.
-2. Build the frozen `stateDisposed` payload, emit it through the emitter. Each handler runs in `try/catch`; thrown values append to the disposal error log.
+2. Build the frozen `stateDisposed` payload, dispatch it via `emitter.emitCollect('stateDisposed', payload, errorLog)` (§4.3). The emitter iterates handlers in registration order, runs each inside `try/catch`, and pushes any thrown value onto `errorLog`. Iteration does not abort on a thrown handler.
 3. Invoke `integrationRegistry.invokeAll(instance, errorLog)`. Same try/catch discipline.
 4. Call the resource-clearing callback (clears caches, ledger, ring buffers, segment store; nulls references). Library-internal; cannot fail.
 5. Detach the emitter (clears all subscribers; subsequent `on()` calls and event emissions are no-ops). Clear the integration registry.
@@ -219,9 +219,19 @@ export type ContextLensEventMap = {
 };
 ```
 
-The payload object is created once per `dispose()` call (in step 1 of teardown) and `Object.freeze`-d before being passed to `emit`. Handlers receive the same frozen reference; mutation attempts produce a strict-mode `TypeError`.
+The payload object is created once per `dispose()` call (in step 1 of teardown) and `Object.freeze`-d before being passed to the emitter. Handlers receive the same frozen reference; mutation attempts produce a strict-mode `TypeError`.
 
-The event emitter itself requires no changes — its dispatch logic is the same as for any other event. The teardown orchestrator's `try/catch` discipline around `emitter.emit('stateDisposed', payload)` is the only departure from the standard "errors swallowed and logged" path of cl-spec-007 §10.3.
+The standard `emit` path swallows handler errors per cl-spec-007 §10.3. cl-spec-015 §4.3 mandates a localized deviation for `stateDisposed` — handler errors must be aggregated into `DisposalError` rather than discarded. Wrapping `emit('stateDisposed', payload)` in an outer `try/catch` does not work, because per-handler errors never propagate out of `emit`. The deviation is implemented instead as a new method on `EventEmitter`:
+
+```ts
+emitCollect<E extends keyof TMap>(
+  event: E,
+  payload: TMap[E],
+  errorLog: unknown[],
+): void
+```
+
+Behavior is identical to `emit` except the per-handler `try/catch` pushes the thrown value onto `errorLog` instead of discarding it. The re-entrancy warning is preserved. The standard `emit` method is unchanged and continues to govern every other event in the catalog. The teardown orchestrator (§4.1.5 step 2) calls `emitCollect` exclusively for `stateDisposed`; no other code path uses it.
 
 ### 4.4 ContextLens (index.ts modifications)
 
@@ -490,6 +500,7 @@ The same value flows to the `stateDisposed` event payload (built in step 1 of te
 **`events.test.ts` (new tests):**
 - `stateDisposed` payload is frozen — mutation attempts throw `TypeError` in strict mode.
 - The event map type accepts `stateDisposed` with the documented payload shape (compile-time check via type tests).
+- `emitCollect` dispatches handlers in registration order and pushes per-handler thrown values onto the supplied `errorLog` (in the order they were caught); iteration does not abort on a thrown handler; non-throwing handlers run normally; the standard `emit` path continues to swallow errors and is unaffected.
 
 ### Integration tests
 
@@ -534,7 +545,7 @@ In `test/bench/lifecycle.bench.ts`:
 
 - `lifecycle.ts` is implemented with the `IntegrationRegistry` class, `READ_ONLY_METHODS` set, `guardDispose` helper, and `runTeardown` orchestrator. It has no upward imports.
 - `errors.ts` exports `DisposedError` (extends `Error`) and `DisposalError` (extends `AggregateError`) with the documented field shapes and message conventions.
-- `events.ts` includes `stateDisposed` in `ContextLensEventMap` with the frozen-payload shape; the existing emitter requires no behavioral changes.
+- `events.ts` includes `stateDisposed` in `ContextLensEventMap` with the frozen-payload shape and `EventEmitter` exposes a new `emitCollect(event, payload, errorLog)` method that captures handler errors instead of swallowing them. The standard `emit` method is unchanged; `emitCollect` is invoked exclusively by the teardown orchestrator for `stateDisposed`.
 - `ContextLens` exposes `dispose(): void`, `readonly isDisposed: boolean`, `readonly isDisposing: boolean`, and the `@internal attachIntegration` method. Every existing public method calls `guardDispose` as its first statement. The class generates a unique `instanceId` in the constructor and exposes it.
 - `fleet.ts` `register` attaches a teardown callback via `attachIntegration` and stores the handle. `unregister` detaches the handle. The `instanceDisposed` event is in `FleetEventMap` and fires from the auto-unregister callback. A registered instance whose `dispose()` runs is auto-removed from the tracked set.
 - `otel.ts` constructor attaches a teardown callback. `disconnect()` detaches the handle and is convergent with auto-disconnect. The `context_lens.instance.disposed` log event fires from the auto-disconnect path.
