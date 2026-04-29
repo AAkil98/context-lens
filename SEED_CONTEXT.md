@@ -37,6 +37,8 @@ Key decisions made in Spec 6:
 - Provider switching triggers full recount of all active segments
 - context-lens counts content tokens only — framing tokens are the caller's responsibility
 
+Lifecycle amendment (2026-04-29) — cl-spec-015 cross-reference: §6.3 gained a "Provider lifecycle is caller-managed" paragraph; new Invariant 14a (Caller-owned provider lifecycle); §9 references gained cl-spec-015 entry. No behavioral change — formalizes the existing boundary that `dispose()` does not invoke provider shutdown hooks.
+
 **Spec 2 (Quality Model) is complete:** `specs/02-quality-model.md`
 
 Key decisions made in Spec 2:
@@ -97,7 +99,9 @@ Key decisions made in Spec 5:
 - Embedding cache: keyed on (contentHash, providerName), LRU-bounded (default 4096), separate from similarity cache. No time-based expiration.
 - Provider switch: 5-step invalidation cascade (clear embedding cache, invalidate similarity cache, invalidate quality scores, recompute all segments, recompute task). Atomic. Rollback to trigrams on mid-way failure.
 - Fallback: individual failures propagate (no silent per-call fallback). Report-level trigram fallback on persistent failure. Mode consistency enforced per report. No cross-mode score comparison.
-- 10 invariants including single provider, mode consistency, fallback always available, lifecycle-synchronous embedding.
+- 11 invariants including single provider, mode consistency, fallback always available, lifecycle-synchronous embedding, caller-owned provider lifecycle (added 2026-04-29 to acknowledge cl-spec-015 boundary).
+
+Lifecycle amendment (2026-04-29) — cl-spec-015 cross-reference: §3.4 gained a "Provider lifecycle is caller-managed" paragraph; new Invariant 11 (Caller-owned provider lifecycle); §9 references gained cl-spec-015 entry. No behavioral change — formalizes the existing boundary that `dispose()` does not invoke provider shutdown hooks.
 
 **Spec 7 (API Surface) is complete:** `specs/07-api-surface.md`
 

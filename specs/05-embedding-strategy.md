@@ -4,8 +4,8 @@ title: Embedding Strategy
 type: design
 status: complete
 created: 2026-04-01
-revised: 2026-04-01
-authors: [Akil Abderrahim, Claude Opus 4.6]
+revised: 2026-04-29
+authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
 tags: [embedding, similarity, provider, adapter, fallback, trigram, caching]
 depends_on: [cl-spec-002]
 ---
@@ -333,6 +333,8 @@ Setting the provider to null switches from embedding mode to trigram mode. All c
 
 **Registration is idempotent for the same provider.** If the caller calls `setEmbeddingProvider` with a provider whose `metadata.name` matches the current provider's name, context-lens treats it as a no-op — no cache invalidation, no recomputation. This allows callers to set the provider defensively (e.g., on every initialization path) without penalty. The check is on `metadata.name`, not object identity — two distinct provider objects with the same name are considered the same provider.
 
+**Provider lifecycle is caller-managed.** The embedding provider object is supplied by the caller and its lifetime is the caller's responsibility. context-lens holds a reference to the provider for the duration of the session, calls its `embed` and `embedBatch` methods, and reads its metadata — but it does not create, configure, shut down, or otherwise manage the provider. When a `ContextLens` instance is disposed (cl-spec-015), the library drops its reference to the provider in step 4 of teardown, but it does not invoke any shutdown hook the provider may expose. Providers with their own asynchronous lifecycle (network connection pools, worker threads, subprocess handles) are shut down by the caller after `dispose()` returns; cl-spec-015 §6.5 specifies the recommended pattern (`dispose()` first, then `await provider.close?.()`). This boundary is intentional and load-bearing — `dispose()` is synchronous (cl-spec-015 §3.5), and embedding it within an async provider-shutdown sequence would force every public method to reason about an "is this instance still being torn down?" race.
+
 ---
 
 ## 4. Embedding Lifecycle
@@ -624,6 +626,8 @@ These invariants are guarantees that the implementation must uphold and that con
 
 **10. Deterministic truncation.** When the provider declares `maxInputTokens` and content exceeds it, context-lens truncates the content before embedding. The truncation is deterministic — same content, same tokenizer, same limit → same truncated text. The cached embedding is keyed on the full content's hash (section 2.3), so truncation is transparent to the cache layer. The full content is retained in the segment; only the text passed to `embed` is truncated.
 
+**11. Caller-owned provider lifecycle.** The embedding provider's lifetime is fully owned by the caller. context-lens does not invoke any provider lifecycle hook — no construction, no warmup, no shutdown — at any point in the session, including during `dispose()` (cl-spec-015). When the instance is disposed, the library drops its reference to the provider; the provider's own teardown (network pool drain, worker thread termination, etc.) is the caller's responsibility, performed after `dispose()` returns. (Section 3.4; cl-spec-015 §6.5.)
+
 ---
 
 ## 9. References
@@ -636,7 +640,8 @@ These invariants are guarantees that the implementation must uphold and that con
 | `cl-spec-003` (Degradation Patterns) | Pattern thresholds operate on similarity scores produced by the embedding or trigram path |
 | `cl-spec-004` (Task Identity) | Task description embedding (section 6.1), trigram fallback (section 6.2), preparation caching (section 6.3) |
 | `cl-spec-006` (Tokenization Strategy) | Parallel provider abstraction pattern — one required method, optional batch, metadata. Cache structure (LRU, content-hash keyed). Provider switch triggers full recount/recomputation |
+| `cl-spec-015` (Instance Lifecycle) | Defines `dispose()` and the boundary between library-managed and caller-managed resources. The embedding provider falls on the caller-managed side: §3.4 of this spec and §6.5 of cl-spec-015 jointly specify that `dispose()` does not invoke provider shutdown hooks and the caller must shut down providers after `dispose()` returns. Invariant 11 is the canonical statement of this boundary. |
 
 ---
 
-*context-lens -- authored by Akil Abderrahim and Claude Opus 4.6*
+*context-lens -- authored by Akil Abderrahim, Claude Opus 4.6, and Claude Opus 4.7*
