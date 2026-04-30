@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ContextLens } from '../../src/index.js';
 import { ContextLensFleet } from '../../src/fleet.js';
-import { DuplicateIdError, ValidationError } from '../../src/errors.js';
-import type { Segment, ActivePattern } from '../../src/types.js';
+import { DisposedError, DuplicateIdError, ValidationError } from '../../src/errors.js';
+import type { Segment, ActivePattern, InstanceReport } from '../../src/types.js';
 
 // ─── Helpers ────────────────────────────────────────────────────
 
@@ -553,6 +553,138 @@ describe('ContextLensFleet — Unit Tests', () => {
     it('rejects invalid degradationThreshold', () => {
       expect(() => new ContextLensFleet({ degradationThreshold: -0.1 })).toThrow(ValidationError);
       expect(() => new ContextLensFleet({ degradationThreshold: 1.1 })).toThrow(ValidationError);
+    });
+  });
+
+  // ── Lifecycle integration (cl-spec-012 §7) ───────────────────
+
+  describe('Lifecycle integration', () => {
+    it('register throws DisposedError when the instance is already disposed', () => {
+      const lens = makeLens();
+      lens.dispose();
+      expect(() => fleet.register(lens, 'window-1')).toThrow(DisposedError);
+    });
+
+    it('register is atomic — DisposedError leaves fleet untouched', () => {
+      const lens = makeLens();
+      lens.dispose();
+      try { fleet.register(lens, 'doomed'); } catch { /* expected */ }
+      expect(fleet.size).toBe(0);
+      expect(fleet.listInstances()).toEqual([]);
+      expect(fleet.get('doomed')).toBeNull();
+    });
+
+    it('dispose() on a registered instance fires instanceDisposed with the documented payload', () => {
+      const lens = makeLens();
+      const id = lens.instanceId;
+      lens.add(distinctContent(0));
+      fleet.register(lens, 'window-1');
+
+      const events: { label: string; instanceId: string; finalReport: InstanceReport | null }[] = [];
+      fleet.on('instanceDisposed', (e) => { events.push(e); });
+
+      lens.dispose();
+
+      expect(events).toHaveLength(1);
+      expect(events[0]!.label).toBe('window-1');
+      expect(events[0]!.instanceId).toBe(id);
+      expect(events[0]!.finalReport).not.toBeNull();
+      expect(events[0]!.finalReport!.status).toBe('ok');
+      expect(events[0]!.finalReport!.report).not.toBeNull();
+    });
+
+    it('auto-unregister removes the instance from the tracked set', () => {
+      const lens = makeLens();
+      lens.add(distinctContent(0));
+      fleet.register(lens, 'window-1');
+      expect(fleet.size).toBe(1);
+
+      lens.dispose();
+
+      expect(fleet.size).toBe(0);
+      expect(fleet.listInstances()).toEqual([]);
+      expect(fleet.get('window-1')).toBeNull();
+    });
+
+    it('disposing one instance leaves other registered instances untouched', () => {
+      const a = makeLens();
+      const b = makeLens();
+      a.add(distinctContent(0));
+      b.add(distinctContent(1));
+      fleet.register(a, 'a');
+      fleet.register(b, 'b');
+
+      a.dispose();
+
+      expect(fleet.size).toBe(1);
+      expect(fleet.get('a')).toBeNull();
+      expect(fleet.get('b')).toBe(b);
+      expect(b.isDisposed).toBe(false);
+    });
+
+    it('explicit unregister silences auto-emit — subsequent dispose fires no instanceDisposed event', () => {
+      const lens = makeLens();
+      fleet.register(lens, 'window-1');
+      let emitted = 0;
+      fleet.on('instanceDisposed', () => { emitted++; });
+
+      fleet.unregister('window-1');
+      lens.dispose();
+
+      expect(emitted).toBe(0);
+      expect(lens.isDisposed).toBe(true);
+    });
+
+    it('assessFleet excludes auto-unregistered instances after disposal', () => {
+      const a = makeLens();
+      const b = makeLens();
+      a.add(distinctContent(0));
+      b.add(distinctContent(1));
+      fleet.register(a, 'a');
+      fleet.register(b, 'b');
+
+      b.dispose();
+      const report = fleet.assessFleet();
+
+      expect(report.instanceCount).toBe(1);
+      expect(report.instances.map(r => r.label)).toEqual(['a']);
+    });
+
+    it('subsequent unregister of an auto-unregistered label throws "Label not found"', () => {
+      const lens = makeLens();
+      fleet.register(lens, 'window-1');
+      lens.dispose();
+
+      expect(() => fleet.unregister('window-1')).toThrow(ValidationError);
+    });
+
+    it('throwing instanceDisposed handler does not bubble — disposal completes cleanly', () => {
+      const lens = makeLens();
+      fleet.register(lens, 'window-1');
+      fleet.on('instanceDisposed', () => { throw new Error('subscriber boom'); });
+
+      // Fleet's standard emit swallows handler errors (cl-spec-007 §10.3), so
+      // the throw is absorbed inside the integration callback. dispose() does
+      // not raise DisposalError.
+      expect(() => lens.dispose()).not.toThrow();
+      expect(lens.isDisposed).toBe(true);
+      expect(fleet.size).toBe(0);
+    });
+
+    it('disposing without ever assessing still produces a finalReport (status=ok, fresh assess)', () => {
+      const lens = makeLens();
+      // No add(), no assess() — handleInstanceDisposal calls assessOneInstance
+      // with cached=false, which performs a fresh assess() during teardown.
+      fleet.register(lens, 'fresh');
+
+      const events: { finalReport: InstanceReport | null }[] = [];
+      fleet.on('instanceDisposed', (e) => { events.push(e); });
+
+      lens.dispose();
+
+      expect(events).toHaveLength(1);
+      expect(events[0]!.finalReport).not.toBeNull();
+      expect(events[0]!.finalReport!.status).toBe('ok');
     });
   });
 });
