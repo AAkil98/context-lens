@@ -114,15 +114,25 @@ The registry is single-threaded and synchronous; no concurrency guards. It is ow
 
 ```ts
 export const READ_ONLY_METHODS: ReadonlySet<string> = new Set([
+  // From cl-spec-015 §3.4 (12 unchanged + 1 reconciled below)
   'getCapacity', 'getSegment', 'listSegments', 'getSegmentCount',
   'listGroups', 'getGroup',
   'getTask', 'getTaskState',
   'getDiagnostics', 'assess', 'planEviction', 'snapshot',
-  'getEvictionHistory',
+  'getEvictedSegments',
+  // Audit additions (T6)
+  'getTokenizerInfo', 'getEmbeddingProviderInfo',
+  'getBaseline', 'getConstructionTimestamp', 'getConfig',
+  'getPerformance', 'getDetection',
 ]);
 ```
 
 Any public method on `ContextLens` not in this set is **mutating** — its disposed-state guard fires on `isDisposing || isDisposed`. The classification is used by the dispatch helper in §4.1.4. The set is exhaustive and frozen at module load.
+
+**Audit results (T6).** The 13 names listed in cl-spec-015 §3.4 do not match the concrete public surface of the v0.1.0 `ContextLens` class one-to-one. The T6 audit produced a 20-name set:
+
+- **Reconciled (1).** cl-spec-015 §3.4 lists `getEvictionHistory`; the v0.1.0 implementation provides `getEvictedSegments` (returning `Segment[]`, not `EvictionRecord[]`). Treated as a single method for classification — both names refer to the read-only "what was evicted" query. The naming/return-type mismatch between design and impl is a separate concern that the read-only-vs-mutating classification does not need to resolve.
+- **Audit-added (7).** The v0.1.0 surface includes seven additional read-only methods absent from cl-spec-015 §3.4: `getTokenizerInfo`, `getEmbeddingProviderInfo` (provider metadata getters, returning deep-copied metadata); `getBaseline` (returns `BaselineSnapshot | null`); `getConstructionTimestamp` (returns a constructor-captured constant); `getConfig` (returns a deep copy of the config); `getPerformance`, `getDetection` (return references to internal modules — read-only call from the caller's perspective; the returned reference exposes a mutable internal but is unaffected by step 4 since the caller already holds it). All seven are uncontroversially read-only by the cl-spec-015 §3.4 criterion ("backing state is intact during disposal").
 
 `assess()` is classified as read-only despite invalidating internal caches and emitting `reportGenerated`. The rationale: from the caller's perspective, `assess()` is a query — it returns the current quality report. The cache invalidation and event emission are mechanism, not contract. During disposal, an `assess()` call from inside a `stateDisposed` handler or integration callback receives a fresh report computed from intact backing state (step 4 has not yet run); the `reportGenerated` event fires through the still-attached registry but reaches handlers in the same dispatch loop, which is consistent with how `assess()` always behaves.
 
@@ -138,11 +148,11 @@ export function guardDispose(
 
 Throws `DisposedError` if the call is forbidden under the current lifecycle state:
 
-- If `state === 'disposed'`: throw, regardless of method name (every public method except the three lifecycle exemptions throws post-disposal).
+- If `state === 'disposed'`: throw, regardless of method name (every public method except the four lifecycle exemptions — `dispose`, `isDisposed`, `isDisposing`, `instanceId` — throws post-disposal).
 - If `state === 'disposing'` and `methodName` is **not** in `READ_ONLY_METHODS`: throw (mutating method called during disposal).
 - Otherwise: return without throwing.
 
-The guard is called as the first statement of every public method on `ContextLens` (except `dispose`, `isDisposed`, `isDisposing`). It runs before argument validation, before deep-copy, before any internal delegation. The performance overhead is one set membership check + two comparisons — negligible compared to the method body.
+The guard is called as the first statement of every public method on `ContextLens` (except `dispose`, `isDisposed`, `isDisposing`, `instanceId` — all four are always-valid surfaces per cl-spec-007 §9.4 / cl-spec-015 §2.5). It runs before argument validation, before deep-copy, before any internal delegation. The performance overhead is one set membership check + two comparisons — negligible compared to the method body.
 
 #### 4.1.5 Teardown orchestrator
 
@@ -491,7 +501,7 @@ The same value flows to the `stateDisposed` event payload (built in step 1 of te
 - `IntegrationRegistry.invokeAll` runs callbacks in registration order. A throwing callback does not abort iteration; the thrown value appears in the error log; subsequent callbacks still run.
 - `guardDispose` returns silently when state is `'live'`. Throws `DisposedError` for any method when state is `'disposed'`. Throws for mutating methods when state is `'disposing'`. Returns silently for read-only methods when state is `'disposing'`.
 - `runTeardown` executes steps in the documented order (verified by an instrumented mock that records step entry/exit). Caller-callback errors during steps 2 and 3 are captured. Library-internal steps (1, 4, 5, 6) are infallible.
-- `READ_ONLY_METHODS` set contains exactly the 13 names specified in cl-spec-015 §3.4. Mutating methods are not in the set.
+- `READ_ONLY_METHODS` set contains the audited 20 names from §4.1.3 (12 unchanged from cl-spec-015 §3.4, the `getEvictionHistory → getEvictedSegments` reconciliation, and 7 audit-added entries). Known mutating methods are not in the set; lifecycle exemptions (`dispose`, `isDisposed`, `isDisposing`, `instanceId`) are not in the set.
 
 **`errors.test.ts` (new tests):**
 - `DisposedError.name === 'DisposedError'`. `instanceof Error` is true. `instanceId` and `attemptedMethod` carry the constructor arguments. Default message follows the specified form.

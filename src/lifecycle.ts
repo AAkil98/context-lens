@@ -1,15 +1,17 @@
 /**
  * Internal lifecycle infrastructure for cl-spec-015.
  *
- * Owns the IntegrationRegistry. Imports only types/errors/events — does not
- * import index.ts, fleet.ts, or otel.ts (the registry receives anonymous
- * callbacks; it knows nothing about the integrations that register them).
+ * Owns the IntegrationRegistry, the read-only-method classification, and the
+ * disposed-state guard. Imports only types/errors/events — does not import
+ * index.ts, fleet.ts, or otel.ts (the registry receives anonymous callbacks;
+ * it knows nothing about the integrations that register them).
  *
  * @see cl-spec-015 §3, §4, §6
  * @internal
  */
 
-import type { IntegrationTeardown, IntegrationHandle } from './types.js';
+import { DisposedError } from './errors.js';
+import type { IntegrationTeardown, IntegrationHandle, LifecycleState } from './types.js';
 
 interface IntegrationEntry<T> {
   readonly callback: IntegrationTeardown<T>;
@@ -60,5 +62,73 @@ export class IntegrationRegistry<T = unknown> {
       if (!entry.detached) count++;
     }
     return count;
+  }
+}
+
+// ─── Read-only method classification (impl-spec I-06 §4.1.3) ──────
+
+/**
+ * Public methods on ContextLens whose disposed-state guard fires only on
+ * `state === 'disposed'`. Mutating methods (everything not in this set)
+ * additionally throw while `state === 'disposing'`.
+ *
+ * 20 names: 12 unchanged from cl-spec-015 §3.4, the `getEvictionHistory →
+ * getEvictedSegments` reconciliation, and 7 audit-added entries from the
+ * concrete v0.1.0 public surface (impl-spec I-06 §4.1.3).
+ *
+ * @see cl-spec-015 §3.4
+ * @internal
+ */
+export const READ_ONLY_METHODS: ReadonlySet<string> = new Set([
+  // From cl-spec-015 §3.4 (12 unchanged + 1 reconciled)
+  'getCapacity',
+  'getSegment',
+  'listSegments',
+  'getSegmentCount',
+  'listGroups',
+  'getGroup',
+  'getTask',
+  'getTaskState',
+  'getDiagnostics',
+  'assess',
+  'planEviction',
+  'snapshot',
+  'getEvictedSegments',  // reconciled: spec says `getEvictionHistory`, code uses `getEvictedSegments`
+  // Audit additions (T6)
+  'getTokenizerInfo',
+  'getEmbeddingProviderInfo',
+  'getBaseline',
+  'getConstructionTimestamp',
+  'getConfig',
+  'getPerformance',
+  'getDetection',
+]);
+
+// ─── Disposed-state guard (impl-spec I-06 §4.1.4) ──────────────────
+
+/**
+ * Throws `DisposedError` if the call is forbidden under the current lifecycle
+ * state. Called as the first statement of every public method on ContextLens
+ * (except the four always-valid surfaces `dispose`, `isDisposed`,
+ * `isDisposing`, `instanceId`).
+ *
+ * Behavior:
+ * - `state === 'disposed'`: throws regardless of method name.
+ * - `state === 'disposing'` and method not in `READ_ONLY_METHODS`: throws.
+ * - Otherwise: returns.
+ *
+ * @see cl-spec-015 §3.4, §5.1
+ * @internal
+ */
+export function guardDispose(
+  state: LifecycleState,
+  methodName: string,
+  instanceId: string,
+): void {
+  if (state === 'disposed') {
+    throw new DisposedError(instanceId, methodName, 'disposed');
+  }
+  if (state === 'disposing' && !READ_ONLY_METHODS.has(methodName)) {
+    throw new DisposedError(instanceId, methodName, 'disposing');
   }
 }
