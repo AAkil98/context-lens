@@ -248,4 +248,51 @@ describe('ContinuityTracker', () => {
       expect(wc).toBeLessThanOrEqual(1);
     });
   });
+
+  describe('clear (cl-spec-015 §4.1)', () => {
+    it('resets ledger, recent events, per-segment continuity, and cumulative totals', () => {
+      ct.trackSegmentInfo(0.8, 100);
+      ct.recordEviction('s1', 100, 0.8, 1.0, 100, 1000);
+      ct.recordCompaction('s2', 200, 100, 0.5, 0.2, 1100);
+
+      expect(ct.getSummary().totalEvictions).toBe(1);
+      expect(ct.getSummary().totalCompactions).toBe(1);
+
+      ct.clear();
+
+      const after = ct.getSummary();
+      expect(after.totalEvictions).toBe(0);
+      expect(after.totalCompactions).toBe(0);
+      expect(after.totalRestorations).toBe(0);
+      expect(after.netLoss).toBe(0);
+      expect(after.recentEvents).toEqual([]);
+      expect(after.tokensEvicted).toBe(0);
+      expect(after.tokensCompacted).toBe(0);
+    });
+
+    it('windowContinuity returns to 1.0 (default) after clear', () => {
+      ct.trackSegmentInfo(0.8, 100);
+      ct.recordEviction('s1', 100, 0.8, 1.0, 100, 1000);
+      expect(ct.getWindowContinuity()).toBeLessThan(1.0);
+
+      ct.clear();
+      expect(ct.getWindowContinuity()).toBe(1.0);
+    });
+
+    it('per-segment continuity resets — previously-compacted segments score 1.0 again', () => {
+      ct.recordCompaction('s2', 200, 100, 0.5, 0.2, 1100);
+      expect(ct.getSegmentContinuity('s2')).toBeLessThan(1.0);
+
+      ct.clear();
+      expect(ct.getSegmentContinuity('s2')).toBe(1.0);
+    });
+
+    it('tracker remains functional after clear', () => {
+      ct.recordEviction('s1', 100, 0.8, 1.0, 100, 1000);
+      ct.clear();
+
+      ct.recordEviction('s2', 50, 0.5, 0.5, 50, 2000);
+      expect(ct.getSummary().totalEvictions).toBe(1);
+    });
+  });
 });

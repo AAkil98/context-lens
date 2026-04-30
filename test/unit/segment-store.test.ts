@@ -827,4 +827,36 @@ describe('SegmentStore', () => {
       expect(restored.map(s => s.id)).toEqual(['pos-1', 'pos-2', 'pos-3']);
     });
   });
+
+  describe('clear (cl-spec-015 §4.1)', () => {
+    it('empties active, evicted, and group maps', () => {
+      const { store } = createTestHarness();
+      store.add('a', { id: 'seg-a' });
+      store.add('b', { id: 'seg-b' });
+      store.evict('seg-b');
+      store.add('c', { id: 'seg-c' });
+      store.createGroup('g-1', ['seg-a', 'seg-c']);
+
+      expect(store.segmentCount).toBeGreaterThan(0);
+      expect(store.getEvictedSegments().length).toBeGreaterThan(0);
+      expect(store.listGroups()).toHaveLength(1);
+
+      store.clear();
+
+      expect(store.segmentCount).toBe(0);
+      expect(store.getEvictedSegments()).toEqual([]);
+      expect(store.listGroups()).toEqual([]);
+      expect(store.getOrderedActiveSegments()).toEqual([]);
+    });
+
+    it('store remains functional after clear (can add new segments)', () => {
+      const { store } = createTestHarness();
+      store.add('original', { id: 'seg-1' });
+      store.clear();
+
+      const result = store.add('post-clear', { id: 'seg-new' });
+      expect(isSegment(result)).toBe(true);
+      expect(store.segmentCount).toBe(1);
+    });
+  });
 });

@@ -562,4 +562,36 @@ describe('Tokenizer.getInfo()', () => {
       expect(counts['ps-2']).toBe(42);
     });
   });
+
+  describe('clearCache (cl-spec-015 §4.1)', () => {
+    it('empties the cache; subsequent count() recomputes from the provider', () => {
+      let providerCalls = 0;
+      const provider: TokenizerProvider = { count: () => { providerCalls++; return 7; } };
+      const tok = new Tokenizer(
+        provider,
+        { name: 'p', accuracy: 'exact', modelFamily: null, errorBound: null },
+        256,
+      );
+
+      tok.count('hello');
+      expect(providerCalls).toBe(1);
+      tok.count('hello');
+      expect(providerCalls).toBe(1);  // cached — no new provider call
+
+      tok.clearCache();
+      tok.count('hello');
+      expect(providerCalls).toBe(2);  // recomputed
+    });
+
+    it('is idempotent and the tokenizer remains functional after clearCache', () => {
+      const tok = new Tokenizer('approximate', undefined, 256);
+      tok.count('seed-content');
+      expect(() => {
+        tok.clearCache();
+        tok.clearCache();
+        tok.clearCache();
+      }).not.toThrow();
+      expect(tok.count('post-clear')).toBeGreaterThan(0);
+    });
+  });
 });

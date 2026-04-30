@@ -224,4 +224,14 @@ export class Tokenizer {
   getInfo(): TokenizerMetadata {
     return { ...this.metadata };
   }
+
+  /**
+   * Empty the token-count cache. Used by the teardown orchestrator (step 4).
+   * The tokenizer remains functional — subsequent count() calls recompute
+   * from the active provider and repopulate the cache.
+   * @see cl-spec-015 §4.1
+   */
+  clearCache(): void {
+    this.cache.clear();
+  }
 }
