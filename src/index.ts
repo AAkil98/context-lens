@@ -28,10 +28,11 @@ import type {
 } from './types.js';
 import {
   ConfigurationError,
+  DisposalError,
   ValidationError,
 } from './errors.js';
 import { EventEmitter, type ContextLensEventMap } from './events.js';
-import { IntegrationRegistry, guardDispose } from './lifecycle.js';
+import { IntegrationRegistry, guardDispose, runTeardown } from './lifecycle.js';
 import { Tokenizer } from './tokenizer.js';
 import { SegmentStore, type AddOptions, type UpdateChanges, type RestoreOptions, type CreateGroupOptions, type DuplicateSignal } from './segment-store.js';
 import { EmbeddingEngine } from './embedding.js';
@@ -272,6 +273,58 @@ export class ContextLens {
   attachIntegration(callback: IntegrationTeardown<ContextLens>): IntegrationHandle {
     guardDispose(this.lifecycleState, 'attachIntegration', this.instanceId);
     return this.integrations.attach(callback);
+  }
+
+  /**
+   * Release every resource the instance holds and transition to the terminal
+   * `disposed` state. Idempotent (subsequent calls are no-ops) and reentrant-
+   * safe (a `stateDisposed` handler that calls `dispose()` again returns
+   * immediately via the disposing flag). Always-valid: never calls
+   * {@link guardDispose} on itself.
+   *
+   * Six-step teardown sequence delegated to {@link runTeardown}:
+   * 1. Set lifecycle state to `disposing`.
+   * 2. Emit `stateDisposed` via `emitCollect` (handler errors aggregated).
+   * 3. Invoke registered integration teardown callbacks.
+   * 4. Clear owned resources (caches, ledger, ring buffers, segment store).
+   * 5. Detach the emitter and the integration registry.
+   * 6. Set lifecycle state to `disposed`.
+   *
+   * Throws {@link DisposalError} only if one or more handler or integration
+   * callbacks threw during steps 2–3. The instance is fully disposed by the
+   * time the error propagates — disposal is never rolled back.
+   *
+   * @see cl-spec-015 §3, §4.1
+   */
+  dispose(): void {
+    if (this.lifecycleState === 'disposed') return;   // idempotent post-disposal
+    if (this.lifecycleState === 'disposing') return;  // reentrant-safe
+
+    const errorLog = runTeardown<ContextLens>({
+      setState: (s) => { this.lifecycleState = s; },
+      emitter: this.emitter,
+      integrations: this.integrations,
+      instance: this,
+      payloadFactory: () => Object.freeze({
+        type: 'stateDisposed' as const,
+        instanceId: this.instanceId,
+        timestamp: Date.now(),
+      }),
+      clearResources: () => {
+        this.store.clear();
+        this.tokenizer.clearCache();
+        this.embedding.clearCache();
+        this.similarity.clearCache();
+        this.continuity.clear();
+        this.diagnosticsManager.clear();
+        this.cachedReport = null;
+        this.qualityCacheValid = false;
+      },
+    });
+
+    if (errorLog.length > 0) {
+      throw new DisposalError(this.instanceId, errorLog);
+    }
   }
 
   // ── Segment Operations ──────────────────────────────────────────
