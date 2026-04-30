@@ -17,6 +17,7 @@ import type {
   RankedInstance,
   FleetCapacity,
   FleetReport,
+  IntegrationHandle,
 } from './types.js';
 import { ValidationError, DuplicateIdError } from './errors.js';
 import { EventEmitter } from './events.js';
@@ -31,6 +32,7 @@ const DEFAULT_DEGRADATION_THRESHOLD = 0.5;
 export interface FleetEventMap {
   instanceDegraded: { label: string; pattern: ActivePattern };
   instanceRecovered: { label: string; pattern: string; duration: number };
+  instanceDisposed: { label: string; instanceId: string; finalReport: InstanceReport | null };
   fleetDegraded: { degradedCount: number; totalCount: number; ratio: number; hotspots: Hotspot[] };
   fleetRecovered: { degradedCount: number; totalCount: number; ratio: number };
 }
@@ -49,6 +51,8 @@ export interface InstanceInfo {
 
 interface InstanceState {
   instance: ContextLens;
+  /** Lifecycle integration handle — detached on explicit `unregister` to silence auto-unregister (cl-spec-012 §3.2). */
+  handle: IntegrationHandle;
   lastAssessedAt: number | null;
   activePatterns: Set<string>;
   patternActivatedAt: Map<string, number>;
@@ -94,7 +98,14 @@ export class ContextLensFleet {
 
   /**
    * Register a ContextLens instance under a unique label.
+   *
+   * Performs the lifecycle integration handshake by calling
+   * `instance.attachIntegration` — propagates `DisposedError` if the instance
+   * is already disposed (cl-spec-012 §3.1, cl-spec-015 §6.2). Map mutations
+   * are deferred until after the handshake succeeds so registration is atomic.
+   *
    * @throws {DuplicateIdError} If the label is already registered.
+   * @throws {DisposedError} If the instance is already disposed.
    * @see cl-spec-012 §3
    */
   register(instance: ContextLens, label: string): void {
@@ -108,20 +119,33 @@ export class ContextLensFleet {
       throw new ValidationError('Instance must be a valid ContextLens instance');
     }
 
+    // Lifecycle integration handshake (cl-spec-012 §3.1, cl-spec-015 §6.2). May throw DisposedError.
+    const handle = instance.attachIntegration((live) => {
+      this.handleInstanceDisposal(label, live);
+    });
+
     this.labels.push(label);
     this.instances.set(label, {
       instance,
+      handle,
       lastAssessedAt: null,
       activePatterns: new Set(),
       patternActivatedAt: new Map(),
     });
   }
 
-  /** Unregister a previously registered instance. */
+  /**
+   * Unregister a previously registered instance. Detaches the lifecycle
+   * integration handle so a later `dispose()` on the instance does not fire
+   * `instanceDisposed` on this fleet (cl-spec-012 §3.2 — explicit unregister
+   * is silent; only auto-unregister emits the event).
+   */
   unregister(label: string): void {
-    if (!this.instances.has(label)) {
+    const state = this.instances.get(label);
+    if (state === undefined) {
       throw new ValidationError(`Label not found: ${label}`, { label });
     }
+    state.handle.detach();
     this.instances.delete(label);
     const idx = this.labels.indexOf(label);
     if (idx !== -1) this.labels.splice(idx, 1);
@@ -290,6 +314,40 @@ export class ContextLensFleet {
         capacity,
       };
     }
+  }
+
+  // ── Private: lifecycle integration callback (cl-spec-012 §7) ─
+
+  /**
+   * Invoked synchronously during step 3 of an instance's `dispose()` teardown.
+   * Computes a final InstanceReport, emits `instanceDisposed` on the fleet
+   * emitter, and removes the instance from the tracked set. Errors thrown by
+   * `assess()` are tolerated — `assessOneInstance` already absorbs internal
+   * exceptions, but the outer try/catch is belt-and-suspenders for any future
+   * change. Per cl-spec-015 §6.2, the instance is in `isDisposing === true`
+   * state during this callback; mutations would throw `DisposedError`, but
+   * read-only `assess()` and `getCapacity()` are valid.
+   */
+  private handleInstanceDisposal(label: string, instance: ContextLens): void {
+    const state = this.instances.get(label);
+    if (state === undefined) return;  // defensive: explicit unregister won the race
+
+    let finalReport: InstanceReport | null = null;
+    try {
+      finalReport = this.assessOneInstance(state, label, false, Date.now());
+    } catch {
+      finalReport = null;
+    }
+
+    this.emitter.emit('instanceDisposed', {
+      label,
+      instanceId: instance.instanceId,
+      finalReport,
+    });
+
+    this.instances.delete(label);
+    const idx = this.labels.indexOf(label);
+    if (idx !== -1) this.labels.splice(idx, 1);
   }
 
   // ── Private: aggregation ─────────────────────────────────────

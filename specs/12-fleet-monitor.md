@@ -2,12 +2,12 @@
 id: cl-spec-012
 title: Fleet Monitor
 type: design
-status: draft
+status: complete
 created: 2026-04-04
-revised: 2026-04-04
-authors: [Akil Abderrahim, Claude Opus 4.6]
-tags: [fleet, multi-instance, aggregation, monitoring, multi-agent, orchestration]
-depends_on: [cl-spec-007, cl-spec-011]
+revised: 2026-04-29
+authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
+tags: [fleet, multi-instance, aggregation, monitoring, multi-agent, orchestration, lifecycle]
+depends_on: [cl-spec-007, cl-spec-011, cl-spec-015]
 ---
 
 # Fleet Monitor
@@ -20,8 +20,9 @@ depends_on: [cl-spec-007, cl-spec-011]
 4. Fleet Assessment
 5. Fleet Report
 6. Fleet Events
-7. Invariants and Constraints
-8. References
+7. Instance Disposal Handling
+8. Invariants and Constraints
+9. References
 
 ---
 
@@ -88,18 +89,22 @@ Adds a context-lens instance to the fleet under the given label. The label is a 
 
 An instance can be registered with multiple fleets under different labels. The fleet holds a reference — it does not take ownership. The caller remains responsible for the instance's lifecycle (mutations, assessment cadence, disposal).
 
+Registration also establishes the fleet as a **lifecycle-aware integration** of the instance per cl-spec-015 §6. The fleet attaches a teardown callback to the instance; when the instance is disposed (via `dispose()`), the callback fires during step 3 of teardown and the fleet auto-unregisters the instance per the contract specified in section 7. The bidirectional link — fleet holds back-reference to instance, instance holds teardown callback to fleet — is torn down atomically by `dispose()`. The exact registration handshake is internal; from the caller's perspective, `fleet.register(instance, label)` is sufficient to set up both directions.
+
+Registering an already-disposed instance throws `DisposedError` (cl-spec-015 §7.2): the fleet calls a public method on the instance during attachment, and post-disposal calls throw. Callers should not retain handles to disposed instances for fleet registration.
+
 ### 3.2 unregister
 
 ```
 unregister(label: string) → void
 ```
 
-Removes an instance from the fleet. The instance is not affected — only the fleet's reference is removed.
+Removes an instance from the fleet. The instance is not affected — only the fleet's reference is removed and the fleet's teardown callback is detached.
 
 **Preconditions:**
 - `label` must be registered. Throws `ValidationError` if not found.
 
-After unregistration, the instance does not appear in subsequent fleet reports or events.
+After unregistration, the instance does not appear in subsequent fleet reports or events. Explicit `unregister()` is independent of the auto-unregister path triggered by instance disposal (section 7) — both paths converge on the same end state (instance removed from tracked set, back-references dropped) but explicit unregister leaves the instance live, while auto-unregister is driven by the instance's own disposal.
 
 ### 3.3 listInstances
 
@@ -279,6 +284,7 @@ Same subscription model as the core event system (cl-spec-007 §9.1). Returns an
 |-------|---------|-------------|
 | `instanceDegraded` | `{ label, pattern: ActivePattern }` | Any registered instance activates a new pattern (detected during `assessFleet`). |
 | `instanceRecovered` | `{ label, pattern: string, duration: number }` | A previously active pattern on a registered instance resolves (detected during `assessFleet`). |
+| `instanceDisposed` | `{ label, instanceId: string, finalReport: InstanceReport \| null }` | A registered instance's `dispose()` runs and the fleet's teardown callback fires (section 7). `finalReport` is the final aggregated InstanceReport for the disposed instance, or `null` if the fleet had no live state to flush. Fired before the instance is removed from the tracked set. |
 | `fleetDegraded` | `{ degradedCount, totalCount, ratio, hotspots: Hotspot[] }` | The fraction of instances with active patterns exceeds the `degradationThreshold` (section 2). |
 | `fleetRecovered` | `{ degradedCount, totalCount, ratio }` | The fraction of instances with active patterns drops below the `degradationThreshold` after a `fleetDegraded` event. |
 
@@ -286,11 +292,57 @@ Same subscription model as the core event system (cl-spec-007 §9.1). Returns an
 
 `instanceDegraded` and `instanceRecovered` fire for each pattern state change. `fleetDegraded` and `fleetRecovered` fire based on the threshold ratio. Hysteresis is not applied at the fleet level — pattern-level hysteresis on each instance (cl-spec-003 §9.3) provides sufficient stability. Fleet events are derived from stable per-instance signals.
 
-**Cached mode.** Fleet events are not emitted when `assessFleet({ cached: true })` is used, because cached reports may not reflect state changes. Events are only emitted when fresh assessment provides reliable diffs.
+**Cached mode.** Fleet events are not emitted when `assessFleet({ cached: true })` is used, because cached reports may not reflect state changes. Events are only emitted when fresh assessment provides reliable diffs. The `instanceDisposed` event is the exception — it is driven by the instance's disposal, not by `assessFleet`, so it fires regardless of whether the fleet is in cached or fresh mode.
 
 ---
 
-## 7. Invariants and Constraints
+## 7. Instance Disposal Handling
+
+The fleet is a **lifecycle-aware integration** of every registered instance, per cl-spec-015 §6. When a registered instance is disposed (the caller invokes `instance.dispose()`), the fleet receives a teardown callback during step 3 of the instance's teardown sequence (cl-spec-015 §4.1). This section specifies the callback's behavior, the resulting state changes, and the relationship between explicit `unregister()` and auto-unregister-on-disposal.
+
+### 7.1 Teardown callback behavior
+
+When an instance's `dispose()` runs, the fleet's teardown callback is invoked synchronously, in step 3 of the instance's teardown. Inside the callback the fleet observes (per cl-spec-015 §6.2):
+
+- `instance.isDisposed === false`
+- `instance.isDisposing === true`
+- All read-only public methods on the instance behave per their live specification (`getDiagnostics`, `assess`, `snapshot`, etc.). Mutating methods throw `DisposedError`.
+- Step 4 of the instance's teardown (resource clearing) has not yet run — caches, ledger, and ring buffers are intact.
+
+The fleet's callback executes the following steps in order:
+
+1. **Compute and emit a final aggregated InstanceReport for the just-disposed instance.** This is the fleet's last opportunity to read the instance's accumulated state. The fleet may invoke `instance.assess()` (if the fleet has not already assessed the instance during the current `assessFleet()` call) or read the latest cached report. The result is packaged as the `finalReport` field of the `instanceDisposed` event payload. If the instance was never assessed through the fleet and the fleet does not invoke a final `assess()`, `finalReport` is `null`.
+2. **Emit the `instanceDisposed` event** (section 6.2) with the `label`, the instance's `instanceId` (matching the `stateDisposed` event payload from cl-spec-015 §7.1), and the `finalReport`.
+3. **Remove the instance from the fleet's tracked-instances set.** Subsequent `assessFleet()`, `listInstances()`, `get()`, and event emissions must not include the disposed instance. The removal is unconditional — it happens whether or not step 1 succeeded, so a flush failure does not pin a disposed instance in the fleet's tracking structures.
+4. **Drop the back-reference to the instance.** The fleet's retained pointer is nulled so the instance's owned resources can be collected after step 4 of teardown completes.
+
+### 7.2 Constraints inside the callback
+
+The fleet must not, during the teardown callback (cl-spec-015 §6.2):
+
+- Mutate the instance — `add()`, `update()`, `evict()`, etc. throw `DisposedError` per the read-only-during-disposal rule. The fleet has no operational reason to mutate, but the rule applies regardless.
+- Re-attach itself or any other integration to the instance.
+- Throw to abort disposal. Errors thrown by the callback are caught, aggregated into the per-call disposal error log, and surfaced to the caller of `dispose()` as a `DisposalError` (cl-spec-015 §4.3, §7.2). The instance still transitions to disposed regardless of how many fleet callbacks throw.
+- Call back into `instance.dispose()` from the callback. Reentrance is permitted by the lifecycle (returns immediately as a no-op via the `isDisposing` check), but the fleet has no operational reason to re-enter — it has already received the notification.
+
+### 7.3 Auto-unregister vs explicit unregister
+
+The fleet exposes two paths for removing an instance from its tracked set:
+
+| Path | Trigger | Effect on instance | Effect on fleet |
+|------|---------|-------------------|----------------|
+| `fleet.unregister(label)` | Explicit caller call | Instance remains live | Fleet drops back-reference, detaches teardown callback. No `instanceDisposed` event. |
+| Instance disposal | `instance.dispose()` runs | Instance transitions to disposed | Fleet's teardown callback fires, emits `instanceDisposed`, drops back-reference. |
+
+The two paths converge on the same fleet-side end state (instance removed from tracked set, back-references dropped). They differ in event semantics — explicit `unregister()` is silent on the fleet event channel; auto-unregister fires `instanceDisposed`. Callers who want the fleet to emit a final report on instance shutdown should rely on disposal rather than calling `unregister()` first.
+
+### 7.4 Polling fallback
+
+If the caller has not registered fleet events and instead detects "missing" instances by polling `instance.isDisposed` on registered instances, that path continues to work after the auto-unregister: `instance.isDisposed` returns `true` once `dispose()` returns successfully (cl-spec-015 §2.5). The polling path is a fallback for callers who defer fleet-side cleanup to a separate scan; the callback path is the recommended mechanism because it permits the final-report flush.
+
+---
+
+## 8. Invariants and Constraints
 
 **Invariant 1: Read-only consumer.** The fleet monitor does not call segment-mutating methods or configuration-mutating methods on registered instances. It calls `assess()` (or uses cached reports), `getCapacity()`, and `getSegmentCount()` — all of which are non-mutating reads or cache-updating computations.
 
@@ -302,20 +354,25 @@ Same subscription model as the core event system (cl-spec-007 §9.1). Returns an
 
 **Invariant 5: Event consistency.** Fleet events are emitted only during `assessFleet()` calls with `cached: false`. The event payloads reflect the current assessment, not stale data. `fleetDegraded` is emitted at most once per sustained degradation period — it does not re-fire on each `assessFleet()` while the condition persists. `fleetRecovered` fires when the condition clears.
 
-**Invariant 6: No internal state dependency.** The fleet depends only on the public API of `ContextLens` (cl-spec-007). It does not access internal state, private methods, or implementation details. A conforming `ContextLens` implementation with the same public API would work with the fleet without modification.
+**Invariant 6: No internal state dependency.** The fleet depends only on the public API of `ContextLens` (cl-spec-007). It does not access internal state, private methods, or implementation details. A conforming `ContextLens` implementation with the same public API would work with the fleet without modification. The lifecycle-aware integration registration (section 7) is part of the public API per cl-spec-015 §6.
+
+**Invariant 7: Auto-unregister on disposal.** A registered instance whose `dispose()` runs (cl-spec-015) is automatically removed from the fleet's tracked set during step 3 of the instance's teardown. After the instance's `dispose()` returns, the fleet does not include the instance in any subsequent `assessFleet`, `listInstances`, `get`, or event emission. The fleet emits exactly one `instanceDisposed` event per auto-unregister (section 6.2). Explicit `unregister(label)` and auto-unregister produce the same fleet-side end state but differ in event semantics (section 7.3).
+
+**Invariant 8: Disposed-instance rejection at registration.** `fleet.register(instance, label)` rejects already-disposed instances with `DisposedError` (raised by the instance's public method that the fleet calls during attachment). The fleet does not silently accept a disposed instance and never emits events for one.
 
 **Serialization.** Fleet state is not serializable. The fleet holds instance references, not instance state. To persist and restore a fleet, serialize individual instances via `snapshot()` (cl-spec-014), restore them via `fromSnapshot()`, and re-register with a new fleet instance.
 
 ---
 
-## 8. References
+## 9. References
 
 | Reference | Description |
 |-----------|-------------|
-| `cl-spec-007` (API Surface) | Defines the public API that the fleet consumes: `assess()`, `getCapacity()`, `getSegmentCount()`. The fleet is a consumer of this API. |
+| `cl-spec-007` (API Surface) | Defines the public API that the fleet consumes: `assess()`, `getCapacity()`, `getSegmentCount()`, the lifecycle methods (`dispose`, `isDisposed`, `isDisposing`), and the `DisposedError` raised on disposed-instance method calls. The fleet is a consumer of this API. |
 | `cl-spec-003` (Degradation Patterns) | Defines the pattern detection results that the fleet aggregates into hotspots and fleet-level degradation events. |
 | `cl-spec-011` (Report Schema) | Defines schema conventions followed by the FleetReport. The fleet report extends the schema vocabulary with fleet-specific types (FleetAggregate, Hotspot, FleetCapacity). |
+| `cl-spec-015` (Instance Lifecycle) | Defines the lifecycle-aware integration model that this spec implements. Section 7 (Instance Disposal Handling) specifies the per-fleet teardown callback contract executed during step 3 of an instance's `dispose()` teardown sequence. cl-spec-015 §6.3 enumerates the same fleet-side behavior from the lifecycle perspective. |
 
 ---
 
-*context-lens -- authored by Akil Abderrahim and Claude Opus 4.6*
+*context-lens -- authored by Akil Abderrahim, Claude Opus 4.6, and Claude Opus 4.7*

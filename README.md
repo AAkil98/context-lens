@@ -2,9 +2,18 @@
 
 Context window quality monitoring for LLM applications.
 
-Everyone managing LLM context windows truncates blind. Token count is the only signal. But context has *quality* — coherence, density, relevance, continuity — and quality degrades in predictable, detectable ways long before the window fills up.
+## The problem
 
-context-lens measures what token counting can't.
+Everyone managing LLM context windows truncates blind. Token count is the only signal — when the window fills, the oldest stuff (or the longest stuff) gets dropped. But context has *quality*, and quality degrades in predictable, detectable ways long before the window fills up:
+
+- An assistant keeps restating facts the user already confirmed → **density drops** as redundancy climbs.
+- Tool-call outputs get interleaved with unrelated discussion → **coherence drops** as adjacent segments stop relating.
+- A long session drifts from the task the user originally asked about → **relevance drops** as content loses task-fit.
+- Older turns are evicted, the model loses thread, and later turns refer back to things no longer present → **continuity drops** as cumulative loss accumulates.
+
+By the time token count is the alarm, the model has already been operating on a degraded window for some number of turns. Truncation is belated cleanup, not prevention.
+
+context-lens measures what token counting can't. It scores four quality dimensions from structural signals — no LLM calls required — detects five named degradation patterns with severity levels, and returns ranked eviction candidates when you need to make room. The library reports; the caller decides what to do.
 
 ## Features
 
@@ -87,7 +96,7 @@ npm install @madahub/context-lens
 | Providers | `setTokenizer`, `setEmbeddingProvider`, `getTokenizerInfo`, `getEmbeddingProviderInfo` |
 | Inspection | `getCapacity`, `getSegment`, `listSegments`, `getSegmentCount`, `getBaseline`, `getDiagnostics` |
 | Patterns | `registerPattern` (custom degradation patterns) |
-| Events | `on(event, handler)` → unsubscribe function (22 event types) |
+| Events | `on(event, handler)` → unsubscribe function (24 event types) |
 | Serialization | `snapshot`, `ContextLens.fromSnapshot` |
 
 ### `ContextLensFleet` (`context-lens/fleet`)
@@ -129,13 +138,13 @@ One instance, one window. Caller-driven mutations — context-lens never auto-ev
 
 **Detection:** Five base patterns classify quality degradation. Three severity levels with hysteresis to prevent flicker. Six compound patterns identify multi-dimensional crises. Custom patterns register at construction or runtime.
 
-**Eviction advisory:** Five-signal weighted ranking (relevance, density, coherence contribution, importance, age). Four protection tiers enforced as walls: default < priority(n) < seed < pinned. Strategy auto-selected from active patterns. Groups evicted atomically.
+**Eviction advisory:** Five-signal weighted ranking (relevance retention, information loss, coherence contribution, importance, age retention). Four protection tiers enforced as walls: default < priority(n) < seed < pinned. Strategy auto-selected from active patterns. Groups evicted atomically.
 
 **Performance budget:** Queries < 1ms, mutations < 5ms, assessment < 50ms, planning < 100ms at n <= 500, excluding provider latency. O(n^2) bottlenecks managed by sampling at n > 200.
 
 ## Design specs
 
-14 design specs in `specs/` define the behavioral contract. These are the authoritative reference — implementation answers to design. See `SEED_CONTEXT.md` for the full spec map and key decisions.
+14 design specs in `specs/` define the behavioral contract — they are the authoritative reference, and implementation answers to design. Start with [`specs/README.md`](specs/README.md) for an index, a 20-minute reading order, and a list of open questions. `SEED_CONTEXT.md` records the amendment history and key decisions per spec.
 
 ## License
 

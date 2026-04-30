@@ -12,6 +12,8 @@ import {
   ProtectionError,
   CompactionError,
   RestoreError,
+  DisposedError,
+  DisposalError,
 } from '../../src/errors.js';
 import type {
   Segment,
@@ -1192,5 +1194,270 @@ describe('ContextLens — Cache Invalidation After Mutations', () => {
     const r2 = lens.assess();
     expect(r2.capacity.capacity).toBe(20000);
     expect(r2.reportId).not.toBe(r1.reportId);
+  });
+});
+
+// ─── Lifecycle surface (cl-spec-015 §2.5, §6.2) ────────────────────
+
+describe('Lifecycle surface', () => {
+  it('instanceId matches the documented cl-N-xxxxxx format', () => {
+    const lens = makeLens();
+    expect(lens.instanceId).toMatch(/^cl-\d+-[a-z0-9]+$/);
+  });
+
+  it('two instances get distinct instanceIds', () => {
+    const a = makeLens();
+    const b = makeLens();
+    expect(a.instanceId).not.toBe(b.instanceId);
+  });
+
+  it('instanceId is stable across reads', () => {
+    const lens = makeLens();
+    const first = lens.instanceId;
+    expect(lens.instanceId).toBe(first);
+    expect(lens.instanceId).toBe(first);
+  });
+
+  it('isDisposed returns false on a fresh instance', () => {
+    expect(makeLens().isDisposed).toBe(false);
+  });
+
+  it('isDisposing returns false on a fresh instance', () => {
+    expect(makeLens().isDisposing).toBe(false);
+  });
+
+  it('isDisposed and isDisposing are never simultaneously true on a live instance', () => {
+    const lens = makeLens();
+    expect(lens.isDisposed && lens.isDisposing).toBe(false);
+  });
+
+  it('attachIntegration returns a handle with an idempotent detach()', () => {
+    const lens = makeLens();
+    const handle = lens.attachIntegration(() => {});
+    expect(typeof handle.detach).toBe('function');
+    expect(() => {
+      handle.detach();
+      handle.detach();
+    }).not.toThrow();
+  });
+
+  it('attachIntegration on a live instance does not throw', () => {
+    const lens = makeLens();
+    expect(() => lens.attachIntegration(() => {})).not.toThrow();
+  });
+});
+
+// ─── Disposed-state guard wiring (cl-spec-015 §3.4, §5.1) ──────────
+//
+// T10 wires guardDispose into every public method but the live path is
+// unchanged. These tests force the lifecycle state via a private-field
+// cast to verify the guard arms correctly. T11 will exercise the same
+// behavior through the real dispose() method, and T15 covers exhaustive
+// post-disposal property-based coverage.
+
+describe('Disposed-state guard wiring', () => {
+  function forceState(lens: ContextLens, state: 'disposed' | 'disposing'): void {
+    (lens as unknown as { lifecycleState: string }).lifecycleState = state;
+  }
+
+  it('mutating methods throw DisposedError when state is "disposed"', () => {
+    const lens = makeLens();
+    forceState(lens, 'disposed');
+    expect(() => lens.add('x')).toThrow(DisposedError);
+    expect(() => lens.setCapacity(5000)).toThrow(DisposedError);
+    expect(() => lens.on('segmentAdded', () => {})).toThrow(DisposedError);
+    expect(() => lens.attachIntegration(() => {})).toThrow(DisposedError);
+  });
+
+  it('read-only methods also throw DisposedError when state is "disposed"', () => {
+    const lens = makeLens();
+    forceState(lens, 'disposed');
+    expect(() => lens.getCapacity()).toThrow(DisposedError);
+    expect(() => lens.getSegmentCount()).toThrow(DisposedError);
+    expect(() => lens.assess()).toThrow(DisposedError);
+    expect(() => lens.snapshot()).toThrow(DisposedError);
+    expect(() => lens.getDiagnostics()).toThrow(DisposedError);
+  });
+
+  it('mutating methods throw DisposedError when state is "disposing"', () => {
+    const lens = makeLens();
+    forceState(lens, 'disposing');
+    expect(() => lens.add('x')).toThrow(DisposedError);
+    expect(() => lens.setCapacity(5000)).toThrow(DisposedError);
+    expect(() => lens.attachIntegration(() => {})).toThrow(DisposedError);
+  });
+
+  it('read-only methods do NOT throw when state is "disposing"', () => {
+    const lens = makeLens();
+    lens.add('seed-content');  // populate something so reads have data
+    forceState(lens, 'disposing');
+    expect(() => lens.getCapacity()).not.toThrow();
+    expect(() => lens.getSegmentCount()).not.toThrow();
+    expect(() => lens.assess()).not.toThrow();
+    expect(() => lens.snapshot()).not.toThrow();
+  });
+
+  it('thrown DisposedError carries instanceId and the attempted method name', () => {
+    const lens = makeLens();
+    const id = lens.instanceId;
+    forceState(lens, 'disposed');
+    try {
+      lens.add('x');
+      expect.fail('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(DisposedError);
+      const err = e as DisposedError;
+      expect(err.instanceId).toBe(id);
+      expect(err.attemptedMethod).toBe('add');
+    }
+  });
+});
+
+// T11: dispose() — real flow. Exercises the orchestrator end-to-end via the
+// public method. Unit-level coverage of mechanism (state machine, idempotency,
+// reentrancy, error aggregation). Full integration flows live in T14.
+
+describe('dispose() — real flow', () => {
+  it('flips lifecycle to disposed and emits stateDisposed exactly once', () => {
+    const lens = makeLens();
+    let count = 0;
+    lens.on('stateDisposed', () => { count++; });
+    lens.dispose();
+    expect(count).toBe(1);
+    expect(lens.isDisposed).toBe(true);
+    expect(lens.isDisposing).toBe(false);
+  });
+
+  it('stateDisposed payload has the documented shape and is frozen', () => {
+    const lens = makeLens();
+    const id = lens.instanceId;
+    const before = Date.now();
+    let captured: { type: string; instanceId: string; timestamp: number } | null = null;
+    lens.on('stateDisposed', (e) => { captured = e; });
+    lens.dispose();
+    const after = Date.now();
+    expect(captured).not.toBeNull();
+    const payload = captured as unknown as { type: string; instanceId: string; timestamp: number };
+    expect(payload.type).toBe('stateDisposed');
+    expect(payload.instanceId).toBe(id);
+    expect(payload.timestamp).toBeGreaterThanOrEqual(before);
+    expect(payload.timestamp).toBeLessThanOrEqual(after);
+    expect(Object.isFrozen(payload)).toBe(true);
+  });
+
+  it('is idempotent — three calls fire stateDisposed exactly once', () => {
+    const lens = makeLens();
+    let count = 0;
+    lens.on('stateDisposed', () => { count++; });
+    expect(() => { lens.dispose(); lens.dispose(); lens.dispose(); }).not.toThrow();
+    expect(count).toBe(1);
+    expect(lens.isDisposed).toBe(true);
+  });
+
+  it('is reentrant-safe — a stateDisposed handler that calls dispose() does not double-emit', () => {
+    const lens = makeLens();
+    let count = 0;
+    lens.on('stateDisposed', () => {
+      count++;
+      lens.dispose();   // reentrant call during teardown — must no-op
+    });
+    expect(() => lens.dispose()).not.toThrow();
+    expect(count).toBe(1);
+    expect(lens.isDisposed).toBe(true);
+  });
+
+  it('mutating methods throw DisposedError after real dispose()', () => {
+    const lens = makeLens();
+    lens.dispose();
+    expect(() => lens.add('x')).toThrow(DisposedError);
+    expect(() => lens.setCapacity(5000)).toThrow(DisposedError);
+    expect(() => lens.attachIntegration(() => {})).toThrow(DisposedError);
+  });
+
+  it('read-only methods throw DisposedError after real dispose()', () => {
+    const lens = makeLens();
+    lens.dispose();
+    expect(() => lens.getCapacity()).toThrow(DisposedError);
+    expect(() => lens.assess()).toThrow(DisposedError);
+    expect(() => lens.snapshot()).toThrow(DisposedError);
+    expect(() => lens.getDiagnostics()).toThrow(DisposedError);
+  });
+
+  it('throwing handler causes DisposalError; instance is fully disposed regardless', () => {
+    const lens = makeLens();
+    const id = lens.instanceId;
+    lens.on('stateDisposed', () => { throw new Error('handler boom'); });
+    let raised: unknown = null;
+    try { lens.dispose(); } catch (e) { raised = e; }
+    expect(raised).toBeInstanceOf(DisposalError);
+    const err = raised as DisposalError;
+    expect(err.instanceId).toBe(id);
+    expect(err.errors.length).toBe(1);
+    const tagged = err.errors[0] as { cause: unknown; origin: string; index: number };
+    expect(tagged.origin).toBe('handler');
+    expect(tagged.index).toBe(0);
+    expect((tagged.cause as Error).message).toBe('handler boom');
+    // Disposal completed despite the throw.
+    expect(lens.isDisposed).toBe(true);
+    expect(lens.isDisposing).toBe(false);
+  });
+
+  it('invokes registered integration callbacks during teardown with the live instance', () => {
+    const lens = makeLens();
+    let invoked = 0;
+    let receivedInstance: unknown = null;
+    let stateAtCallback: { isDisposed: boolean; isDisposing: boolean } | null = null;
+    lens.attachIntegration((live) => {
+      invoked++;
+      receivedInstance = live;
+      stateAtCallback = { isDisposed: live.isDisposed, isDisposing: live.isDisposing };
+    });
+    lens.dispose();
+    expect(invoked).toBe(1);
+    expect(receivedInstance).toBe(lens);
+    // Integration callback runs in step 3 — disposing flag set, disposed not yet.
+    expect(stateAtCallback).toEqual({ isDisposed: false, isDisposing: true });
+  });
+
+  it('throwing integration callback aggregates into DisposalError with origin tag', () => {
+    const lens = makeLens();
+    lens.attachIntegration(() => { throw new Error('integration boom'); });
+    let raised: unknown = null;
+    try { lens.dispose(); } catch (e) { raised = e; }
+    expect(raised).toBeInstanceOf(DisposalError);
+    const err = raised as DisposalError;
+    expect(err.errors.length).toBe(1);
+    const tagged = err.errors[0] as { cause: unknown; origin: string; index: number };
+    expect(tagged.origin).toBe('integration');
+    expect(tagged.index).toBe(0);
+    expect((tagged.cause as Error).message).toBe('integration boom');
+    expect(lens.isDisposed).toBe(true);
+  });
+
+  it('aggregates mixed handler+integration errors with origin-relative indices', () => {
+    const lens = makeLens();
+    lens.on('stateDisposed', () => { throw new Error('h0'); });
+    lens.on('stateDisposed', () => { throw new Error('h1'); });
+    lens.attachIntegration(() => { throw new Error('i0'); });
+    lens.attachIntegration(() => { /* no-throw */ });
+    lens.attachIntegration(() => { throw new Error('i1'); });
+
+    let raised: unknown = null;
+    try { lens.dispose(); } catch (e) { raised = e; }
+    expect(raised).toBeInstanceOf(DisposalError);
+    const err = raised as DisposalError;
+    // 2 handler errors + 2 integration errors (the no-throw integration is skipped).
+    expect(err.errors.length).toBe(4);
+    const items = err.errors as { cause: unknown; origin: string; index: number }[];
+    expect(items[0]).toMatchObject({ origin: 'handler', index: 0 });
+    expect((items[0].cause as Error).message).toBe('h0');
+    expect(items[1]).toMatchObject({ origin: 'handler', index: 1 });
+    expect((items[1].cause as Error).message).toBe('h1');
+    // Integration index restarts at 0 (origin-relative).
+    expect(items[2]).toMatchObject({ origin: 'integration', index: 0 });
+    expect((items[2].cause as Error).message).toBe('i0');
+    expect(items[3]).toMatchObject({ origin: 'integration', index: 1 });
+    expect((items[3].cause as Error).message).toBe('i1');
+    expect(lens.isDisposed).toBe(true);
   });
 });

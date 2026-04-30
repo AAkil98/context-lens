@@ -295,6 +295,25 @@ export class ContinuityTracker {
     return this.recentEvents.toArray();
   }
 
+  /**
+   * Reset all continuity state — ledger, recent-events ring buffer, per-segment
+   * continuity overrides, and the cumulative accumulators. Used by the teardown
+   * orchestrator (step 4); the tracker itself remains functional and would
+   * accumulate new state from any subsequent record* call (none happens during
+   * disposal — step 4 runs after step 3 returns).
+   * @see cl-spec-015 §4.1
+   */
+  clear(): void {
+    this.ledger.length = 0;
+    this.recentEvents.clear();
+    this.segmentContinuity.clear();
+    this.totalEvictionLoss = 0;
+    this.totalCompactionLoss = 0;
+    this.totalRecovery = 0;
+    this.totalInformationValue = 0;
+    this.totalTokensEverSeen = 0;
+  }
+
   /** @internal Used by fromSnapshot to get internal counters. */
   _getCounters(): { totalEvictionLoss: number; totalCompactionLoss: number; totalRecovery: number; totalInformationValue: number; totalTokensEverSeen: number; segmentContinuity: Record<string, number> } {
     const segCont: Record<string, number> = {};

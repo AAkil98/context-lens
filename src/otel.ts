@@ -8,7 +8,7 @@
  */
 
 import type { ContextLens } from './index.js';
-import type { QualityReport } from './types.js';
+import type { QualityReport, IntegrationHandle } from './types.js';
 
 // ─── Minimal OTel interfaces (structural typing) ────────────────
 // Defined locally to avoid tight coupling to specific @opentelemetry/api versions.
@@ -86,6 +86,9 @@ export class ContextLensExporter {
   private readonly emitEvents: boolean;
   private readonly logger: OTelLogger | null;
   private disconnected = false;
+
+  /** Lifecycle integration handle — detached on explicit `disconnect` to silence auto-disconnect (cl-spec-013 §2.1.2). Assigned at the end of the constructor. */
+  private readonly integrationHandle: IntegrationHandle;
 
   // Unsubscribe functions for instance events
   private readonly unsubscribers: (() => void)[] = [];
@@ -179,17 +182,72 @@ export class ContextLensExporter {
 
     // ── Subscribe to instance events ─────────────────────────────
     this.subscribeAll();
+
+    // ── Lifecycle integration handshake (cl-spec-013 §2.1.2) ─────
+    // Attach last so subscribeAll has already validated the instance is
+    // reachable. attachIntegration throws DisposedError if the instance is
+    // already disposed; the constructor lets that propagate.
+    this.integrationHandle = instance.attachIntegration((live) => {
+      this.handleInstanceDisposal(live);
+    });
   }
 
   /**
    * Stop metric updates, remove gauge callbacks, and unsubscribe from all instance events.
-   * Idempotent — safe to call multiple times.
+   * Detaches the lifecycle integration handle so a later `dispose()` on the
+   * instance does not fire the `context_lens.instance.disposed` log event
+   * (cl-spec-013 §2.1.1). Idempotent — safe to call multiple times.
    * @see cl-spec-013 §5
    */
   disconnect(): void {
     if (this.disconnected) return;
     this.disconnected = true;
 
+    this.integrationHandle.detach();
+    this.cleanupSubscriptions();
+  }
+
+  // ── Private: lifecycle integration callback (cl-spec-013 §2.1.2) ─
+
+  /**
+   * Invoked synchronously during step 3 of the instance's `dispose()` teardown.
+   * Performs the final-signal flush (one fresh `assess()` to capture last
+   * composite + utilization), emits the `context_lens.instance.disposed` log
+   * event, and then runs the same subscription cleanup as `disconnect()`.
+   * Convergent end state with explicit `disconnect()` — both leave
+   * `disconnected === true` with no live subscriptions or gauge callbacks.
+   *
+   * Per cl-spec-015 §6.2 the instance is in `isDisposing === true` here;
+   * `assess()` is read-only and passes the disposing-state guard.
+   */
+  private handleInstanceDisposal(instance: ContextLens): void {
+    if (this.disconnected) return;
+    this.disconnected = true;
+
+    let finalReport: QualityReport | null = null;
+    try {
+      finalReport = instance.assess();
+    } catch {
+      finalReport = null;
+    }
+
+    if (this.emitEvents && this.logger) {
+      const attrs: OTelAttributes = { 'instance.id': instance.instanceId };
+      if (finalReport !== null) {
+        if (finalReport.composite !== null) {
+          attrs['instance.final_composite'] = finalReport.composite;
+        }
+        attrs['instance.final_utilization'] = finalReport.capacity.utilization;
+      }
+      this.log('context_lens.instance.disposed', SEV_INFO, attrs);
+    }
+
+    this.cleanupSubscriptions();
+  }
+
+  // ── Private: shared cleanup ──────────────────────────────────
+
+  private cleanupSubscriptions(): void {
     for (const unsub of this.unsubscribers) unsub();
     this.unsubscribers.length = 0;
 

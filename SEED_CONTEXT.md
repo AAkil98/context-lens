@@ -37,6 +37,8 @@ Key decisions made in Spec 6:
 - Provider switching triggers full recount of all active segments
 - context-lens counts content tokens only — framing tokens are the caller's responsibility
 
+Lifecycle amendment (2026-04-29) — cl-spec-015 cross-reference: §6.3 gained a "Provider lifecycle is caller-managed" paragraph; new Invariant 14a (Caller-owned provider lifecycle); §9 references gained cl-spec-015 entry. No behavioral change — formalizes the existing boundary that `dispose()` does not invoke provider shutdown hooks.
+
 **Spec 2 (Quality Model) is complete:** `specs/02-quality-model.md`
 
 Key decisions made in Spec 2:
@@ -97,9 +99,11 @@ Key decisions made in Spec 5:
 - Embedding cache: keyed on (contentHash, providerName), LRU-bounded (default 4096), separate from similarity cache. No time-based expiration.
 - Provider switch: 5-step invalidation cascade (clear embedding cache, invalidate similarity cache, invalidate quality scores, recompute all segments, recompute task). Atomic. Rollback to trigrams on mid-way failure.
 - Fallback: individual failures propagate (no silent per-call fallback). Report-level trigram fallback on persistent failure. Mode consistency enforced per report. No cross-mode score comparison.
-- 10 invariants including single provider, mode consistency, fallback always available, lifecycle-synchronous embedding.
+- 11 invariants including single provider, mode consistency, fallback always available, lifecycle-synchronous embedding, caller-owned provider lifecycle (added 2026-04-29 to acknowledge cl-spec-015 boundary).
 
-**Spec 7 (API Surface) is draft (amended, minor amendment remaining):** `specs/07-api-surface.md`
+Lifecycle amendment (2026-04-29) — cl-spec-015 cross-reference: §3.4 gained a "Provider lifecycle is caller-managed" paragraph; new Invariant 11 (Caller-owned provider lifecycle); §9 references gained cl-spec-015 entry. No behavioral change — formalizes the existing boundary that `dispose()` does not invoke provider shutdown hooks.
+
+**Spec 7 (API Surface) is complete:** `specs/07-api-surface.md`
 
 Key decisions made in Spec 7:
 - OQ-008 resolved: stateful API. Each instance owns segments, scores, caches, history. Stateless rejected (continuity, patterns, caching, baseline all need lifecycle awareness).
@@ -119,6 +123,18 @@ Key decisions made in Spec 7:
 - Progressive disclosure: minimal usage is construct + add + assess. Everything else opt-in.
 
 Amendment complete: `snapshot()`/`fromSnapshot()` added after cl-spec-014 (Serialization) was drafted. 22 events total (19 original + customPatternRegistered + stateSnapshotted + stateRestored).
+
+Further amendment during implementation: `reportGenerated` and `budgetViolation` added. 24 events total.
+
+Lifecycle amendment (2026-04-29) — cl-spec-015 integration:
+- New §9 "Lifecycle" section added (between Capacity/Inspection and Event System). Documents `dispose()`, `isDisposed`, `isDisposing`, `instanceId` with cross-references to cl-spec-015 for the full contract.
+- §10.2 events catalog grew from 24 to 25: added `stateDisposed`.
+- §10.3 handler contract gained a paragraph documenting the deliberate deviation for `stateDisposed` handlers — read-only-during-disposal rule, errors aggregated into `DisposalError`. The deviation is justified on disposal's one-shot terminal nature.
+- §11.1 error hierarchy: `DisposedError` and `DisposalError` added as native-Error and AggregateError subclasses respectively (do not extend `ContextLensError` — see cl-spec-015 §7.2 for rationale).
+- §12 invariants: the prior "Instance lifecycle" paragraph that asserted "no explicit disposal required" is replaced — long-lived callers must now `dispose()`, short-lived callers may.
+- Sections renumbered: Event System §9 → §10, Error Model §10 → §11, Invariants §11 → §12, References §12 → §13. TOC updated. Internal cross-references updated.
+- Post-grill addendum (during impl-spec drafting): §9.4 added for the `instanceId` getter (fourth always-valid public surface, alongside `dispose`, `isDisposed`, `isDisposing`). Disposed-state-guard exemption list updated wherever it appears in §1, §9, §11.3, §12.
+- Status flipped from `draft (amended)` to `complete`.
 
 **Spec 8 (Eviction Advisory) is draft (amended):** `specs/08-eviction-advisory.md`
 
@@ -173,7 +189,7 @@ Key decisions made in Spec 11:
 - Reference implementation ships schema files, static exports, toJSON() utilities, and validation functions
 - 10 invariants including schema conformance, version consistency, self-containment, forward compatibility, deterministic serialization
 
-**Spec 14 (Serialization) is draft:** `specs/14-serialization.md`
+**Spec 14 (Serialization) is complete:** `specs/14-serialization.md`
 
 Key decisions made in Spec 14:
 - OQ-012 resolved: one method, one format, one option — `snapshot({ includeContent })` for full or lightweight snapshots
@@ -182,39 +198,113 @@ Key decisions made in Spec 14:
 - Lightweight snapshot (`includeContent: false`): same format, content null, `restorable: false`, ~10x smaller (~100KB vs ~1.1MB for 500 segments)
 - `fromSnapshot(state, config)` static factory: atomic restore, provider change detection, custom pattern matching by name, quality score invalidation on first assess()
 - Format versioning: "context-lens-snapshot-v1", independent of schema version, forward+backward compatible
-- 8 invariants including snapshot equivalence, round-trip fidelity, atomic restore, content completeness
+- 10 invariants including snapshot equivalence, round-trip fidelity, atomic restore, content completeness, snapshot governed by lifecycle gates, restored instance is live and independent
 
-**Spec 12 (Fleet Monitor) is draft:** `specs/12-fleet-monitor.md`
+Lifecycle amendment (2026-04-29) — cl-spec-015 integration:
+- §1 Overview: snapshot-then-dispose-then-fromSnapshot listed as the fourth motivating use case (state-preserving continuation across disposal).
+- §3.2 Snapshot Is Read-Only: notes that `snapshot()` is governed by the read-only-during-disposal rule — works during `isDisposing === true`, throws `DisposedError` post-disposal.
+- New §3.4 Snapshot-then-dispose continuation: documents the canonical pattern with code example. Snapshot must precede `dispose()`; no recovery path post-disposal.
+- §5.5 Restored Instance Behavior expanded with lifecycle-state paragraph: restored instance is always live, has fresh `instanceId`, source's disposal status does not propagate.
+- New invariants 9 and 10: snapshot governed by lifecycle gates; restored instance is live and independent.
+- Status flipped from `draft` to `complete`.
+
+**Spec 12 (Fleet Monitor) is complete:** `specs/12-fleet-monitor.md`
 
 Key decisions made in Spec 12:
 - OQ-011 resolved: fresh assessment by default (`assessFleet()` calls `assess()` on each instance), cached mode opt-in via `{ cached: true }`
 - ContextLensFleet class: register/unregister instances by label, assessFleet → FleetReport
 - FleetReport: per-instance reports, fleet-wide aggregates (mean/min/max/stddev per dimension), degradation hotspots (sorted by severity), comparative ranking (composite ascending), fleet capacity overview
-- Fleet events: instanceDegraded, instanceRecovered, fleetDegraded (configurable threshold), fleetRecovered
+- Fleet events: instanceDegraded, instanceRecovered, instanceDisposed (added in lifecycle amendment), fleetDegraded (configurable threshold), fleetRecovered
 - Fail-open: one failing instance doesn't break fleet assessment
 - Read-only consumer: fleet calls assess/getCapacity/getSegmentCount, never mutates instances
-- 6 invariants including read-only consumer, instance independence, fail-open assessment
+- 8 invariants including read-only consumer, instance independence, fail-open assessment, auto-unregister on disposal, disposed-instance rejection at registration
 
-**Spec 13 (Observability Export) is draft:** `specs/13-observability-export.md`
+Lifecycle amendment (2026-04-29) — cl-spec-015 integration:
+- Fleet declared a lifecycle-aware integration of every registered instance (cl-spec-015 §6).
+- New §7 Instance Disposal Handling: teardown callback behavior, constraints inside callback, auto-unregister vs explicit unregister, polling fallback.
+- New event `instanceDisposed { label, instanceId, finalReport }` fired during step 3 of an instance's teardown — independent of fleet's cached/fresh mode.
+- §3.1 register: documents the lifecycle integration handshake, throws `DisposedError` on already-disposed instances.
+- §3.2 unregister: distinguishes explicit unregister (silent) from auto-unregister (emits `instanceDisposed`).
+- Sections renumbered: Invariants §7 → §8, References §8 → §9. TOC updated.
+- Status flipped from `draft` to `complete`.
+
+**Spec 13 (Observability Export) is complete:** `specs/13-observability-export.md`
 
 Key decisions made in Spec 13:
 - ContextLensExporter: optional OTel peer dependency, separate entry point (context-lens/otel), read-only consumer
 - 9 gauges (quality dimensions, utilization, segment count, headroom, pattern count), 6 counters (evictions, compactions, restorations, pattern activations, assessments, task changes), 1 histogram (assess duration)
-- 5 OTel log event types: pattern activated/resolved, task changed, capacity warning, budget violation
+- 6 OTel log event types: pattern activated/resolved, task changed, capacity warning, budget violation, instance disposed (added in lifecycle amendment)
 - Common attributes: window label, tokenizer name, embedding mode
 - Push on assess: metrics updated inline on each assess() via event subscription, no polling
 - Convention-based naming: `context_lens.*` prefix, OTel semantic conventions
-- 6 invariants including read-only consumer, optional dependency, metric naming stability
+- 9 invariants including read-only consumer, optional dependency, metric naming stability, auto-disconnect on instance disposal, disposed-instance rejection at construction, at-most-once final flush
+
+Lifecycle amendment (2026-04-29) — cl-spec-015 integration:
+- Exporter declared a lifecycle-aware integration of the monitored instance (cl-spec-015 §6).
+- §2.1 Lifecycle expanded with two subsections: §2.1.1 Explicit disconnect (`disconnect()`), §2.1.2 Auto-disconnect on instance disposal (teardown callback during step 3 of `dispose()`).
+- New event `context_lens.instance.disposed` added to §4.1 with attributes `instance.id`, `instance.final_composite`, `instance.final_utilization`.
+- Recommended pattern documented: do the final-signal flush in the step-3 callback, not in a `stateDisposed` step-2 handler — avoids duplicate flush.
+- Status flipped from `draft` to `complete`.
+
+**Spec 15 (Instance Lifecycle) is complete (post-grill):** `specs/15-instance-lifecycle.md`
+
+Key decisions made in Spec 15:
+- Two-state lifecycle: live and disposed. No intermediate state, no reactivation, no reset. Callers needing state preservation use `snapshot()` (cl-spec-014) before disposal and `fromSnapshot()` after — original instance does not return.
+- `dispose(): void` added: parameterless, fully synchronous, idempotent. Reentrant calls during teardown return immediately via internal disposing flag. `isDisposed` getter added — never throws, flips precisely when dispose() returns successfully; canonical state probe.
+- Six-step teardown in fixed order: set disposing flag → emit stateDisposed → notify external integrations → clear owned resources → detach handler registry → set disposed flag. Step 6 is the single commit point. Total order uniquely determined by adjacency constraints (handlers receive event over still-attached registry; integrations read live state before resources clear; disposed flag flips last).
+- Atomicity: live → disposed is atomic with respect to caller observation. Library-internal steps (1, 4, 5, 6) infallible by construction. Retry contract specified for any future fallible internal step — completed prefix must be no-op-on-rerun or reversible, failure must abort strictly before step 6.
+- Caller-supplied callback errors (stateDisposed handlers in step 2, integration teardown callbacks in step 3) caught, aggregated into a per-call disposal error log, surfaced as a single `DisposalError` after step 6. Never abort teardown — disposal completes regardless of how many callbacks throw.
+- `stateDisposed` event added to cl-spec-007 §9 catalog. Emitted exactly once per instance during step 2 — last event the instance ever emits. Payload: `{ type, instanceId, timestamp }`, frozen and shared across handlers.
+- Two new error types: `DisposedError` (extends Error; raised on every public method except dispose/isDisposed post-disposal; synchronous, before any side effect; carries instanceId + attemptedMethod) and `DisposalError` (extends AggregateError; raised at most once per instance, only when callbacks errored during disposal; instance is fully disposed when raised).
+- Lifecycle-aware integrations (fleets cl-spec-012, OTel exporters cl-spec-013) receive teardown callback in step 3 with `isDisposed === false` and full read access to live state. Must drop back-reference, detach own handlers, complete deferred work (final aggregated report, final OTel signal flush); must not mutate, re-attach, or throw to abort.
+- Providers (tokenizer cl-spec-006, embedder cl-spec-005) are caller-managed — not notified by `dispose()`, not part of step 3. Synchronous `dispose()` deliberately excludes async provider hooks. Recommended pattern: `dispose()` first (releases library's references so no library code can re-invoke a provider), then await provider shutdowns.
+- Supersedes the "no explicit disposal" invariant from cl-spec-007 §11. Long-lived callers (monitoring daemons, multi-agent orchestrators, server processes handling rolling contexts) must dispose; short-lived may dispose to release resources earlier than GC. Retained metadata after disposal is constant-sized (just a flag + instanceId for DisposedError messages) — does not grow with pre-disposal state.
+- 15 numbered invariants covering state machine, dispose contract, teardown atomicity, post-disposal access, events and errors, integrations/providers, and stable identity (`instanceId`).
+
+Grill outcomes (2026-04-29) — three decisions applied to the spec; status flipped to `complete`:
+- **GD-01: Read-only-during-disposal rule.** Resolved §3.4 vs §6.2 asymmetry. Between step 1 and step 6, read-only methods behave per live spec; mutating methods throw `DisposedError`. Same rule applies uniformly to step-2 handlers and step-3 integration callbacks. The wrong "caches non-deterministic" rationale in §3.4 was replaced.
+- **GD-02: `isDisposing` getter added.** Sibling to `isDisposed`. True while `dispose()` is on the stack, false otherwise. Mutually exclusive with `isDisposed`. Lifecycle graph stays two-state — `isDisposing` is a transient observable, not a third state. Library-internal mutation gate now fires on `isDisposing || isDisposed`.
+- **GD-03: Unsubscribe handle no-op rejustified.** Closure pattern verified in cl-spec-007 §9.1 (`on()` returns `Unsubscribe`). Old "not a public method" rationale dropped; replaced with "intrinsically idempotent contract" framing — disposal makes the handler not-present, so the no-op branch fires by construction.
+- Friction #4 also resolved: documented the deviation from cl-spec-007 §9.3's general handler contract (mutations throw vs undefined behavior; handler errors aggregated via `DisposalError` vs swallowed-and-logged) in §3.4 and §4.3.
+- Post-grill addendum (during impl-spec drafting): `instanceId: string` added as a fourth always-valid public surface. Generated once at construction, returned unchanged across live/disposing/disposed states, never throws. Same value as the `stateDisposed` event payload, `DisposedError.instanceId`, and integration teardown notifications. Canonical correlation key for cross-system telemetry. Documented in cl-spec-015 §2.5 and Invariant 15, and in cl-spec-007 §9.4. Adds one slot to the disposed-state-guard exemption list across both specs.
+- `revised:` frontmatter updated to 2026-04-29.
 
 ## Current state
 
-**Implementation and testing complete. Ready for packaging and v0.1.0 publish.**
+**v0.1.0 shipped to npm 2026-04-09. v0.2.0 Phase 6 implementation in progress on `feat/dispose-lifecycle` — T1–T10 of 17 tasks complete; T11–T17 pending. Lifecycle infrastructure fully scaffolded but dormant until `dispose()` lands in T11.**
 
-- 33/33 build tasks done across 5 phases
-- 977 tests passing across 36 test files + 12 performance benchmarks
-- All typechecks clean
-- Report assembler cache bug fixed (was not invalidating on segment mutations)
-- ~10,200 source LOC, ~15,500 test LOC
+v0.1.0 baseline:
+- 33/33 build tasks done across 5 phases (~10,200 source LOC, ~15,500 test LOC)
+- 977 tests passing across 36 test files + 12 performance benchmarks; all typechecks clean
+- Published as `@madahub/context-lens` on npm
+
+v0.2.0 design (this branch):
+- cl-spec-015 (Instance Lifecycle) added; cl-spec-005/006/007/012/013/014 amended for cross-cutting integration
+- 15 design-spec invariants in cl-spec-015 covering state machine, dispose contract, teardown atomicity, post-disposal access, events/errors, integrations/providers, stable identity
+- `impl/I-06-lifecycle.md` (~570 lines, amended in T2 + T6 with `emitCollect` contract and `READ_ONLY_METHODS` audit results) covering Phase 6 build plan
+- `IMPL_JOURNAL.md` — canonical Phase 6 task tracker (17 tasks; T1–T10 done, T11–T17 pending)
+
+v0.2.0 Phase 6 progress (19 commits ahead of `main`):
+- **T1** (`9d9d1ee`) — `IMPL_JOURNAL.md` recreated as v0.2.0 phase tracker
+- **T2** (`0e379d6`) — impl-spec amendment: `EventEmitter.emitCollect` contract for `stateDisposed` dispatch (standard `emit` swallows handler errors per cl-spec-007 §10.3, so the orchestrator needs a different dispatch path)
+- **T3** (`d387ffa`) — `DisposedError extends Error`, `DisposalError extends AggregateError`, `tagOrigin`/`isHandlerOriginTag` helpers; both errors re-exported from package main
+- **T4** (`4b19f54`) — `StateDisposedEvent` type + `stateDisposed` map entry (catalog 24 → 25), `EventEmitter.emitCollect(event, payload, errorLog)` method
+- **T5** (`f6f57ed`) — `IntegrationRegistry<T>` class (flag-based detach, safe against detach-during-iteration); lifecycle types `LifecycleState`, `IntegrationTeardown<T>`, `IntegrationHandle` placed in `types.ts` (deviation from impl-spec §4.1.1 to satisfy §3 dependency direction — fleet/otel must be able to import lifecycle types without importing `lifecycle.ts`)
+- **T6** (`46a5823`) — `READ_ONLY_METHODS` audited (final size 20: 12 unchanged from cl-spec-015 §3.4, `getEvictionHistory → getEvictedSegments` reconciliation, 7 audit-added) + `guardDispose` helper. Impl-spec §4.1.3/§4.1.4/§5 amended.
+- **T7** (`cc3c463`) — `runTeardown(ctx)` orchestrator (six steps in fixed order with handler/integration error tagging via `tagOrigin` + origin-relative indices); `EventEmitter.removeAllListeners()` added as step-5 prerequisite
+- **T8** (`795d1d3`) — internal `clear()` audit; added `Tokenizer.clearCache`, `ContinuityTracker.clear`, `DiagnosticsManager.clear`, `SegmentStore.clear` (embedding/similarity already had `clearCache`)
+- **T9** (`de18631`) — `ContextLens` lifecycle plumbing: `instanceId` (public readonly, format `cl-N-xxxxxx`), `isDisposed`/`isDisposing` getters, `@internal attachIntegration`. Constructor renumbered (added Step 2 for `instanceId` generation). State machine wired but dormant — `lifecycleState` never leaves `'live'`.
+- **T10** (`43087da`) — `guardDispose` wired as the first statement of every existing public method (37 guards added; 38 total with T9's `attachIntegration`); live path unchanged
+- Test count: 977 (Phase 5 exit) → 1066 (+89 across T3–T10). All typechecks + builds clean throughout.
+
+Key implementation decisions captured during T1–T10:
+- **Lifecycle types in `types.ts` (T5).** Impl-spec §4.1.1 example colocated them with the class in `lifecycle.ts`, but §3 dependency direction says fleet/otel import lifecycle types from `types.ts` AND must not import `lifecycle.ts`. Putting types in `types.ts` is the only layout that satisfies both.
+- **Generic registry (T5).** `IntegrationTeardown<T = unknown>` and `IntegrationRegistry<T>` so `lifecycle.ts` doesn't import `ContextLens`. `index.ts` instantiates `new IntegrationRegistry<ContextLens>()`.
+- **Flag-based detach (T5).** `invokeAll` skips entries whose `detached` flag is set. Detach is O(1); registry is safe if a teardown callback unhooks a sibling integration's handle mid-iteration.
+- **`getEvictionHistory → getEvictedSegments` (T6).** Naming/return-type mismatch between cl-spec-007 §6.5 / cl-spec-015 §3.4 (says `getEvictionHistory: EvictionRecord[]`) and v0.1.0 code (`getEvictedSegments: Segment[]`). Treated as same logical method for read-only classification; full rename/return-type reconciliation is out of scope.
+- **Conservative read-only classification (T6).** `getPerformance` and `getDetection` return live internal-module references but are classified read-only — the call itself doesn't mutate, and the caller's hold on the reference survives step 4. Could be reclassified `@internal` later.
+- **`tagOrigin(error, origin, index)` signature (T3).** Resolves impl-spec §4.2 inconsistency between documented signature `tagOrigin(error, origin)` and `{ cause, origin, index }` return shape. Index is an explicit parameter; the orchestrator (T7) tracks index externally via `errorLog.length` deltas before/after each `emitCollect` and `invokeAll`.
+- **`instanceId` is `public readonly` (T9).** Impl-spec §4.4.1 example said `private readonly` but §4.7 calls it "the fourth always-valid public surface". §4.7 wins. Format: `cl-${++INSTANCE_COUNTER}-${Math.random().toString(36).slice(2, 8)}`.
 
 ### What's built
 
@@ -225,16 +315,13 @@ Key decisions made in Spec 13:
 | 3 — Detection & Advisory | **Complete** | detection (5 patterns, hysteresis, compounds, custom registration, fail-open, history), eviction (5-signal ranking, tiers, strategies, compaction), performance (timing, budgets, sampling) |
 | 4 — Public API & Diagnostics | **Complete** | ContextLens class (constructor, 8 segment ops, 4 group ops, task ops, assess, planEviction, provider mgmt, capacity), diagnostics (history, trends, timeline, warnings), formatters (3 pure functions) |
 | 5 — Enrichments | **Complete** | schemas (JSON Schema draft 2020-12, toJSON, validate), serialization (snapshot/fromSnapshot, format versioning, provider change detection), fleet (ContextLensFleet, assessFleet, aggregation, fleet events), OTel (ContextLensExporter, 9 gauges, 6 counters, 1 histogram, 5 log events) |
+| 6 — Instance Lifecycle (v0.2.0) | **In progress: T1–T10 of 17 tasks done** | Done: `lifecycle.ts` module (IntegrationRegistry, READ_ONLY_METHODS, guardDispose, runTeardown), `errors.ts` (DisposedError, DisposalError, tagOrigin/isHandlerOriginTag), `events.ts` (stateDisposed event → 25 events, emitCollect, removeAllListeners), `types.ts` (Lifecycle Domain), internal `clear()` shims (tokenizer, continuity, diagnostics, segment-store), `index.ts` (instanceId, isDisposed, isDisposing, attachIntegration, guardDispose wired into all 37 public methods). Pending: `dispose()` body (T11), fleet auto-unregister + instanceDisposed event (T12), otel auto-disconnect + instance.disposed log event (T13), integration tests (T14), property tests (T15), benchmarks (T16), exports + CHANGELOG (T17). |
 
 ### Test coverage
 
-| Layer | Files | Tests |
-|-------|------:|------:|
-| Unit | 23 | 758 |
-| Integration | 2 | 21 |
-| End-to-end | 1 | 7 |
-| Property-based | 5 | 60 |
-| Benchmarks | 1 | 12 |
+Phase 5 exit (v0.1.0 baseline): **977 tests** across 36 test files + 12 benchmarks.
+
+In progress on `feat/dispose-lifecycle` (after T10): **1066 tests** across 37 test files. Net additions in Phase 6 so far: new `test/unit/lifecycle.test.ts` (41 cases covering `IntegrationRegistry`, `READ_ONLY_METHODS`, `guardDispose`, `runTeardown`); +15 in `errors.test.ts` (DisposedError/DisposalError/helpers); +10 in `events.test.ts` (StateDisposedEvent wiring + `emitCollect` + `removeAllListeners`); +13 in `context-lens.test.ts` (lifecycle surface + guard sanity via cast); +10 across `tokenizer`, `continuity`, `diagnostics`, `segment-store` test files (`clear()` shims). Hard floor for the remaining tasks: 977 (no regression).
 
 ### Key architecture decisions made during implementation
 
@@ -253,11 +340,22 @@ Key decisions made in Spec 13:
 |-------|----------|-------|
 | Baseline not wired | Low | `BaselineManager.notifyAdd()` never called from `captureBaseline()`. Scores work correctly without it (raw scores used). Fix before v0.1.0. |
 | assess@500 over budget | Low | O(n^2) similarity at 500 segments takes ~300ms vs 50ms budget. Sampling mitigates in practice. |
-| No dispose method | Info | Event handlers and caches persist until GC. Plan for v0.2.0. |
+| No dispose method | In progress | Phase 6 active on `feat/dispose-lifecycle`. Lifecycle infrastructure landed (T1–T10); `dispose()` body lands in T11. State machine fully scaffolded but dormant — `lifecycleState` never leaves `'live'` until T11. v0.2.0 target. |
 
 ## What's next
 
-**Shipping.** See `SHIPPING.md` for the full pre-publish checklist, known issues, and release plan (v0.1.0 through v0.3.0).
+**Resume at T11 of Phase 6.** Open `IMPL_JOURNAL.md` for the canonical 17-task plan with status, per-task notes, and test-count deltas. T1–T10 are committed and tested (1066/1066 green); the lifecycle infrastructure is fully scaffolded but dormant. T11 lands `dispose()` itself — the body, the `clearResources` closure, `runTeardown` wiring, `DisposalError` rethrow on non-empty error log. After T11 the state machine activates.
+
+Remaining tasks (T11–T17):
+- **T11** — `dispose()` body in `index.ts` (idempotent, reentrant-safe, six-step teardown via `runTeardown`)
+- **T12** — `fleet.ts` integration: registration handshake via `attachIntegration`, `instanceDisposed` event, auto-unregister callback
+- **T13** — `otel.ts` integration: constructor handshake, `disconnect()` refactor, `context_lens.instance.disposed` log event, auto-disconnect callback
+- **T14** — `test/integration/lifecycle.test.ts` (15 flows from impl-spec §5)
+- **T15** — `test/property/lifecycle.test.ts` (4 fast-check properties)
+- **T16** — `test/bench/lifecycle.bench.ts` (3 microbenchmarks: `dispose-empty <0.5 ms`, `dispose-500 <10 ms`, `guardDispose <100 ns`)
+- **T17** — Public exports audit, `IMPLEMENTATION.md` Phase 6 row → done, `CHANGELOG.md` for v0.2.0, full regression sweep
+
+See `SHIPPING.md` for the full v0.2.0–v0.3.0 release plan.
 
 ## Design review history
 
@@ -308,15 +406,30 @@ Four sweeps executed across 14 specs. 26 findings (R-165 through R-190). Key res
 - `impl/I-03-detection-advisory.md` — Phase 3: detection framework (5 base patterns, 6 compounds, custom registration), eviction advisory (5-signal ranking, 4 strategies), performance instrumentation (3 modules)
 - `impl/I-04-api-integration.md` — Phase 4: ContextLens class (integration layer), diagnostics, formatters (3 modules)
 - `impl/I-05-enrichments.md` — Phase 5: JSON Schema, serialization, fleet monitor, OTel export (4 modules, all optional)
+- `impl/I-06-lifecycle.md` — Phase 6 (v0.2.0): `dispose()`, `isDisposed`/`isDisposing`, `stateDisposed` event, `DisposedError`/`DisposalError`, `IntegrationRegistry`, fleet auto-unregister, OTel auto-disconnect. New module `lifecycle.ts` plus modifications to `errors`, `events`, `index`, `fleet`, `otel`.
 
 Key technology decisions: TypeScript strict mode, tsup for ESM+CJS dual build, vitest + fast-check for testing (unit, integration, property-based, benchmarks), `@opentelemetry/api` as sole peer dep (OTel entry point only).
 
 ## Files to read on pickup
 
-1. `SHIPPING.md` — pre-publish checklist, known issues, release plan (v0.1.0–v0.3.0)
-2. `IMPLEMENTATION.md` — implementation strategy, tech stack, package structure, dependency graph, Phase 1 inline
-3. `impl/I-02-scoring-engine.md` through `impl/I-05-enrichments.md` — per-phase implementation specs
-4. `specs/01-segment-model.md` through `specs/14-serialization.md` — 14 design specs (authoritative behavioral reference)
+Working on v0.2.0 Phase 6 (dispose lifecycle), resuming mid-phase:
+
+1. `IMPL_JOURNAL.md` — **canonical Phase 6 task tracker** with status, per-task notes (decisions, deviations, test deltas), and rollover commit refs. T1–T10 done, T11 next. Read this first.
+2. `impl/I-06-lifecycle.md` — Phase 6 build plan (570 lines, amended in T2 + T6 to specify `emitCollect` and the audited 20-name `READ_ONLY_METHODS` set)
+3. `specs/15-instance-lifecycle.md` — design spec; the source of truth for behavior
+4. `specs/07-api-surface.md` §9 (Lifecycle), §10.2 (stateDisposed event), §10.3 (handler-contract deviation), §11.1 (DisposedError, DisposalError)
+5. `specs/12-fleet-monitor.md` §7 (Instance Disposal Handling) — informs T12
+6. `specs/13-observability-export.md` §2.1 (Lifecycle, two subsections) — informs T13
+7. `specs/14-serialization.md` §3.4 (Snapshot-then-dispose continuation) — informs the snapshot-then-dispose-then-restore flow in T14 integration tests
+8. Branch `feat/dispose-lifecycle`, **19 commits ahead of `main`** (10 commits from the T1–T10 session, plus the prior 9 planning + design commits). Working tree clean. Untracked: `specs/draft.md` (grill notes, kept across the design phase; can be discarded or archived after Phase 6 impl)
+
+Reference (existing v0.1.0 baseline + Phase 6 in-progress modules):
+
+9. `IMPLEMENTATION.md` — strategy document with Phase 6 row added in §5
+10. `SHIPPING.md` — release plan
+11. `impl/I-02-scoring-engine.md` through `impl/I-05-enrichments.md` — prior-phase impl specs
+12. `specs/01-segment-model.md` through `specs/14-serialization.md` — design specs (authoritative behavioral reference)
+13. `src/lifecycle.ts` — internal infrastructure landed in T5–T7 (IntegrationRegistry, READ_ONLY_METHODS, guardDispose, runTeardown). T11's `dispose()` body in `index.ts` will call `runTeardown` from here, supplying a `TeardownContext` with the `clearResources` closure that invokes the six `clear()`/`clearCache()` methods landed in T8.
 
 **Archived:** `REVIEW.md` and `REVIEW_FINDINGS.md` exported to `../archive/context-lens-REVIEW.md` and `../archive/context-lens-REVIEW_FINDINGS.md`
 **Removed:** `IMPL_JOURNAL.md` (build tracker, superseded — all 33 tasks done) and `TEST_STRATEGY.md` (testing uplift plan, superseded — all 5 phases complete)

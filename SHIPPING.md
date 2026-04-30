@@ -2,9 +2,11 @@
 
 ## Current state
 
-Implementation complete. 33 build tasks across 5 phases done. 977 tests passing (unit, integration, e2e, property-based) + 12 performance benchmarks. All typechecks clean. Report assembler cache bug fixed. Testing coverage uplift complete (Phases A–E).
+**v0.1.0 published to npm 2026-04-09.** Phases 1–5 (33 tasks) shipped. 977 tests, 12 performance benchmarks, all typechecks clean.
 
-The library is functionally complete and tested. This document covers what remains before a v0.1.0 publish.
+**v0.2.0 Phase 6 (`feat/dispose-lifecycle`) implementation complete (T1–T17, 26 commits ahead of `main`).** Adds `dispose()`, `isDisposed`, `isDisposing`, `instanceId`, `stateDisposed` event, `DisposedError` / `DisposalError`, fleet auto-unregister + `instanceDisposed`, OTel auto-disconnect + `context_lens.instance.disposed`. 1116 tests across 39 files, 16 benchmark cases. Branch ready for merge / cut. The remaining v0.2.0 backlog items (coverage thresholds, assess@500 perf, fleet serialization, OTel re-attach helper) have not been built — see the v0.2.0 list below for the cadence question.
+
+This document covers what remains before each release.
 
 ---
 
@@ -72,12 +74,17 @@ The library is functionally complete and tested. This document covers what remai
 
 ### v0.2.0 — Hardening
 
-- `dispose()` method for cleanup
-- Coverage thresholds enforced in CI (`vitest.config.ts` — thresholds section already drafted in TEST_STRATEGY)
-- Remove `fleet.ts` and `otel.ts` from coverage exclusions
-- Address assess@500 performance (tighter sampling or incremental similarity)
-- Fleet serialization support
-- OTel exporter re-attachment helper for restored instances
+**Implemented (on `feat/dispose-lifecycle`, ready to ship):**
+- [x] `dispose()` method for cleanup — Phase 6, T1–T17. Includes `isDisposed`/`isDisposing` getters, stable `instanceId`, `stateDisposed` event, `DisposedError`/`DisposalError`, fleet auto-unregister with `instanceDisposed` event, OTel auto-disconnect with `context_lens.instance.disposed` log, snapshot-then-dispose continuation pattern.
+
+**Deferred — open question whether to bundle into v0.2.0 or split:**
+- [ ] Coverage thresholds enforced in CI (`vitest.config.ts` — thresholds section already drafted in TEST_STRATEGY)
+- [ ] Remove `fleet.ts` and `otel.ts` from coverage exclusions
+- [ ] Address assess@500 performance (tighter sampling or incremental similarity)
+- [ ] Fleet serialization support
+- [ ] OTel exporter re-attachment helper for restored instances
+
+The `dispose()` work is large and self-contained — shipping it as v0.2.0 alone (and rolling the rest into v0.2.1 or v0.3.0) is a viable cut.
 
 ### v0.3.0 — Developer experience
 

@@ -489,4 +489,43 @@ describe('DiagnosticsManager', () => {
       expect(latestSummary.anomalies.length).toBeGreaterThanOrEqual(1);
     });
   });
+
+  describe('clear (cl-spec-015 §4.1)', () => {
+    it('empties report history, timeline, warnings, and trend/latest cache', () => {
+      const deps = createDeps();
+      const diag = new DiagnosticsManager(deps);
+
+      deps.emitter.emit('segmentAdded', { segment: makeSegment('s-1') });
+      deps.emitter.emit('reportGenerated', { report: makeReport() });
+      deps.emitter.emit('reportGenerated', { report: makeReport() });
+
+      let snapshot = diag.getDiagnostics();
+      expect(snapshot.timeline.length).toBeGreaterThan(0);
+      expect(snapshot.reportHistory.reports.length).toBeGreaterThan(0);
+
+      diag.clear();
+
+      snapshot = diag.getDiagnostics();
+      expect(snapshot.timeline).toEqual([]);
+      expect(snapshot.reportHistory.reports).toEqual([]);
+      expect(snapshot.warnings).toEqual([]);
+      expect(snapshot.reportHistory.rollingTrend).toBeNull();
+    });
+
+    it('manager remains functional after clear (sequence restarts at 0)', () => {
+      const deps = createDeps();
+      const diag = new DiagnosticsManager(deps);
+
+      deps.emitter.emit('segmentAdded', { segment: makeSegment('pre-1') });
+      deps.emitter.emit('segmentAdded', { segment: makeSegment('pre-2') });
+
+      diag.clear();
+
+      deps.emitter.emit('segmentAdded', { segment: makeSegment('post-1') });
+      const snapshot = diag.getDiagnostics();
+
+      expect(snapshot.timeline.length).toBe(1);
+      expect(snapshot.timeline[0]!.sequence).toBe(0);  // sequence reset
+    });
+  });
 });

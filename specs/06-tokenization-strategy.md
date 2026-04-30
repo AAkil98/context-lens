@@ -4,8 +4,8 @@ title: Tokenization Strategy
 type: design
 status: complete
 created: 2026-03-25
-revised: 2026-04-05
-authors: [Akil Abderrahim, Claude Opus 4.6]
+revised: 2026-04-29
+authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
 tags: [tokenization, token-counting, provider, performance, caching]
 depends_on: [cl-spec-001]
 ---
@@ -490,6 +490,8 @@ Provider switching is an expensive operation — O(n) in the number of active se
 
 This constraint exists because token counts are cached and aggregated under a single provider identity. Mixing providers within one instance would require per-segment provider tracking, per-segment cache partitioning, and would make aggregates meaningless (you cannot sum counts from different tokenizers and get a coherent total).
 
+**Provider lifecycle is caller-managed.** The tokenizer provider object is supplied by the caller and its lifetime is the caller's responsibility. context-lens holds a reference to the provider for the duration of the session, calls its `count` and `countBatch` methods, and reads its metadata — but it does not create, configure, shut down, or otherwise manage the provider. When a `ContextLens` instance is disposed (cl-spec-015), the library drops its reference to the provider in step 4 of teardown, but it does not invoke any shutdown hook the provider may expose. Providers with their own lifecycle (BPE encoder workers, native bindings, subprocess handles for tiktoken) are shut down by the caller after `dispose()` returns; cl-spec-015 §6.5 specifies the recommended pattern (`dispose()` first, then `await tokenizer.close?.()`). This boundary is intentional and load-bearing — `dispose()` is synchronous (cl-spec-015 §3.5), and embedding it within an async provider-shutdown sequence would force every public method to reason about an "is this instance still being torn down?" race.
+
 ### 6.4 Configuration Validation
 
 context-lens validates the configuration at initialization and emits errors or warnings:
@@ -653,6 +655,8 @@ The following invariants hold at all times within the tokenization subsystem. An
 
 14. **Eviction preserves count.** When a segment is evicted, its `tokenCount` at time of eviction is recorded in the `EvictionRecord`. This count is authoritative for audit and for the continuity dimension of the quality model — it represents the tokens reclaimed by the eviction.
 
+14a. **Caller-owned provider lifecycle.** The tokenizer provider's lifetime is fully owned by the caller. context-lens does not invoke any provider lifecycle hook — no construction, no warmup, no shutdown — at any point in the session, including during `dispose()` (cl-spec-015). When the instance is disposed, the library drops its reference to the provider; the provider's own teardown (worker thread termination, native binding cleanup, subprocess wait, etc.) is the caller's responsibility, performed after `dispose()` returns. (Section 6.3; cl-spec-015 §6.5.)
+
 ### Capacity Invariants
 
 15. **Soft enforcement.** Token counts and capacity tracking are reporting mechanisms. No lifecycle operation is blocked because `totalActiveTokens` would exceed `capacity`. context-lens reports the overage; the caller decides. This is inherited from cl-spec-001 invariant 14.
@@ -670,7 +674,8 @@ The following invariants hold at all times within the tokenization subsystem. An
 | `cl-spec-008` (Eviction Advisory) | Uses token counts for eviction candidate ranking (token cost) and reclamation targets. |
 | `cl-spec-009` (Performance Budget) | Sets latency constraints for token counting operations — informs provider selection guidance. |
 | `cl-spec-010` (Diagnostics) | Consumes cache diagnostics (hit rate, evictions, recounts) and provider metadata for observability. |
+| `cl-spec-015` (Instance Lifecycle) | Defines `dispose()` and the boundary between library-managed and caller-managed resources. The tokenizer provider falls on the caller-managed side: §6.3 of this spec and §6.5 of cl-spec-015 jointly specify that `dispose()` does not invoke provider shutdown hooks and the caller must shut down providers after `dispose()` returns. Invariant 14a is the canonical statement of this boundary. |
 
 ---
 
-*context-lens -- authored by Akil Abderrahim and Claude Opus 4.6*
+*context-lens -- authored by Akil Abderrahim, Claude Opus 4.6, and Claude Opus 4.7*

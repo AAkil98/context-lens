@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ContextLens } from '../../src/index.js';
+import { DisposedError } from '../../src/errors.js';
 import {
   ContextLensExporter,
   type OTelMeterProvider,
@@ -516,6 +517,107 @@ describe('ContextLensExporter — Unit Tests', () => {
       for (const g of mock.gauges) {
         expect(g.removed).toBe(true);
       }
+    });
+  });
+
+  // ── Lifecycle integration (cl-spec-013 §2.1.2) ───────────────
+
+  describe('Lifecycle integration', () => {
+    it('constructor throws DisposedError when the instance is already disposed', () => {
+      lens.dispose();
+      expect(() =>
+        new ContextLensExporter(lens, { meterProvider: mock.meterProvider, label: 'doomed' }),
+      ).toThrow(DisposedError);
+    });
+
+    it('disposing the observed instance fires context_lens.instance.disposed log event', () => {
+      const { logProvider, logs } = createMockLoggerProvider();
+      new ContextLensExporter(lens, {
+        meterProvider: mock.meterProvider,
+        label: 'win',
+        logProvider,
+      });
+
+      lens.add(distinctContent(0));
+      lens.dispose();
+
+      const disposedLogs = logs.filter(l => l.body === 'context_lens.instance.disposed');
+      expect(disposedLogs).toHaveLength(1);
+      expect(disposedLogs[0]!.severityText).toBe('INFO');
+      expect(disposedLogs[0]!.attributes!['instance.id']).toBe(lens.instanceId);
+    });
+
+    it('disposed log carries final_composite and final_utilization when assess produces data', () => {
+      const { logProvider, logs } = createMockLoggerProvider();
+      new ContextLensExporter(lens, {
+        meterProvider: mock.meterProvider,
+        label: 'win',
+        logProvider,
+      });
+
+      lens.add(distinctContent(0));
+      lens.add(distinctContent(1));
+      lens.dispose();
+
+      const log = logs.find(l => l.body === 'context_lens.instance.disposed')!;
+      const attrs = log.attributes!;
+      expect(typeof attrs['instance.final_utilization']).toBe('number');
+      // composite may be present (number) or omitted if null — both acceptable.
+      if (attrs['instance.final_composite'] !== undefined) {
+        expect(typeof attrs['instance.final_composite']).toBe('number');
+      }
+    });
+
+    it('disposing the instance removes all gauge callbacks (auto-disconnect cleanup)', () => {
+      new ContextLensExporter(lens, { meterProvider: mock.meterProvider, label: 'win' });
+      lens.dispose();
+      for (const g of mock.gauges) {
+        expect(g.removed).toBe(true);
+      }
+    });
+
+    it('explicit disconnect() detaches the integration handle — subsequent dispose() emits no disposed log', () => {
+      const { logProvider, logs } = createMockLoggerProvider();
+      const exporter = new ContextLensExporter(lens, {
+        meterProvider: mock.meterProvider,
+        label: 'win',
+        logProvider,
+      });
+
+      exporter.disconnect();
+      lens.dispose();
+
+      expect(logs.filter(l => l.body === 'context_lens.instance.disposed')).toHaveLength(0);
+    });
+
+    it('after dispose(), explicit disconnect() is a no-op', () => {
+      const exporter = new ContextLensExporter(lens, {
+        meterProvider: mock.meterProvider,
+        label: 'win',
+      });
+
+      lens.dispose();
+      // disconnected was set during handleInstanceDisposal — explicit call short-circuits.
+      expect(() => exporter.disconnect()).not.toThrow();
+    });
+
+    it('emitEvents: false suppresses the disposed log event', () => {
+      const { logProvider, logs } = createMockLoggerProvider();
+      new ContextLensExporter(lens, {
+        meterProvider: mock.meterProvider,
+        label: 'win',
+        logProvider,
+        emitEvents: false,
+      });
+
+      lens.dispose();
+      expect(logs.filter(l => l.body === 'context_lens.instance.disposed')).toHaveLength(0);
+    });
+
+    it('disposal completes cleanly when no logProvider is configured', () => {
+      new ContextLensExporter(lens, { meterProvider: mock.meterProvider, label: 'win' });
+      expect(() => lens.dispose()).not.toThrow();
+      expect(lens.isDisposed).toBe(true);
     });
   });
 });
