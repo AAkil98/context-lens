@@ -44,7 +44,7 @@ Released: pending. v0.1.0 baseline shipped to npm 2026-04-09.
 | T14 | `test/integration/lifecycle.test.ts` — 15 flows from impl-spec §5 | done | `test/integration/lifecycle.test.ts` (new) | (this commit) |
 | T15 | `test/property/lifecycle.test.ts` — 4 fast-check properties (idempotent, post-disposal-uniformity, mutual-exclusion, classification-completeness) | done | `test/property/lifecycle.test.ts` (new) | (this commit) |
 | T16 | `test/bench/lifecycle.bench.ts` — 3 microbenchmarks (`dispose-empty <0.5 ms`, `dispose-500 <10 ms`, `guardDispose <100 ns`); confirm hot-path tiers don't regress | done | `test/bench/lifecycle.bench.ts` (new) | (this commit) |
-| T17 | Public exports audit, `IMPLEMENTATION.md` row → done, `CHANGELOG.md` for v0.2.0, full regression sweep | pending | `src/index.ts`, `IMPLEMENTATION.md`, `CHANGELOG.md`, `IMPL_JOURNAL.md` | — |
+| T17 | Public exports audit, `IMPLEMENTATION.md` row → done, `CHANGELOG.md` for v0.2.0, full regression sweep | done | `IMPLEMENTATION.md`, `CHANGELOG.md`, `IMPL_JOURNAL.md` | (this commit) |
 
 ## Per-task notes
 
@@ -114,6 +114,13 @@ Released: pending. v0.1.0 baseline shipped to npm 2026-04-09.
 - **Sanity tests via cast.** Added 5 cases that force `lifecycleState` via `(lens as unknown as { lifecycleState: string }).lifecycleState = 'disposed' | 'disposing'` and verify each method category arms correctly. The cast is a code smell (relies on private-field name), but it's the only way to test the guard's behavior in T10 since the real `dispose()` doesn't exist yet. T11 will exercise the same paths via the real flow; T15 will do exhaustive property-based coverage. Coverage: mutating-throws-on-disposed, readonly-throws-on-disposed, mutating-throws-on-disposing, readonly-passes-on-disposing, error-fields-populated.
 - Tests: context-lens.test.ts 127 → 132 (+5). Full suite: 1061 → 1066. Typecheck + build clean. Public d.ts size unchanged at 24.19 KB (no surface change; just guard wiring).
 
+### T17 (done — this commit)
+- **Public exports audit — clean.** `ContextLens.dispose`, `ContextLens.isDisposed`, `ContextLens.isDisposing`, `ContextLens.instanceId`, `ContextLens.attachIntegration` are class-level surfaces (T9, T11). `DisposedError`, `DisposalError` re-exported from package main entry (T3, line 1236-1237 of `index.ts`). `StateDisposedEvent` re-exported as a type from package main entry (T4, line 1241). `FleetEventMap` (which now includes `instanceDisposed`) is exported from `fleet.ts` (no change needed). `IntegrationHandle`, `IntegrationTeardown<T>`, `LifecycleState` are transitively exported from the main entry via the existing `export type * from './types.js'` line — required to live in `types.ts` to satisfy the dependency-direction rule (T5 deviation), so they leak into the public surface. The internal `IntegrationRegistry` class and the `runTeardown` orchestrator stay strictly in `lifecycle.ts` and are not exported. Per impl-spec §6 the type leak is mild — they're useful to external integration packages anyway, and `attachIntegration` is documented `@internal` for the same external-integration use case.
+- **`IMPLEMENTATION.md` updated.** §5 narrative under the Phase Breakdown table flipped from "Phases 1–5 ship in v0.1.0. Phase 6 is the first v0.2.0 phase" to "Phases 1–5 shipped in v0.1.0 (npm 2026-04-09). Phase 6 is complete and ships as v0.2.0". Adds `instanceId` to the feature list. The Phase 6 row in the breakdown table itself was already accurate from the prior amendment; only the prose needed an update.
+- **`CHANGELOG.md` v0.2.0 entry added.** Sections: Features (10 bullets — dispose, getters, instanceId, stateDisposed event, two error types, fleet auto-unregister, OTel auto-disconnect, snapshot continuation), Architecture (3 bullets — new lifecycle.ts module, 38 disposed-state guards with 100ns overhead, caller-managed providers), Tests and quality (1116 tests / 39 files / 15 benchmarks; cl-spec-015 added; 6 specs amended), Internal additions visible on the type surface (the type leak from T5 + the @internal `attachIntegration` entry point). Pre-existing v0.1.0 entry untouched.
+- **Full regression sweep.** `npm test` → 1116 / 1116 across 39 files (Phase 5 baseline 977; +139 over 17 tasks). `npm run typecheck` → clean. `npm run build` → clean ESM + CJS + DTS, no surface-area regression on `index.d.ts` (25.26 KB), `fleet.d.ts` (4.72 KB), `otel.d.ts` (4.47 KB) — the sizes have been stable since T13 (otel) and T12 (fleet) landed their lifecycle additions.
+- **No code change in T17.** This task is the documentation + sign-off rollup. All implementation work landed in T1–T16; T17 records that the package is internally consistent, the public surface matches what the spec promises, and the regression suite is green.
+
 ### T16 (done — this commit)
 - **New file `test/bench/lifecycle.bench.ts`** with three benchmarks per impl-spec §5.
 - **dispose-empty: mean 9.7 µs** (102,830 hz, p99 30 µs). Target: <0.5 ms. **PASS** with ~50× margin. Construction of an empty lens is sub-millisecond, so the construction contamination (see below) is negligible at this scale.
@@ -171,9 +178,9 @@ Released: pending. v0.1.0 baseline shipped to npm 2026-04-09.
 |------:|------:|------:|-----------:|
 | 5 (v0.1.0) exit | 977 | 36 | 12 |
 | 6 (v0.2.0) target | ~1,090 | 39 | 15 |
+| **6 (v0.2.0) actual** | **1,116** | **39** | **16** |
 
-Hard floor through every task in this phase: **977** (no regression).
-Target additions: ~89 unit + 15 integration + 4 property + 3 bench = ~111 new test cases.
+Hard floor held through every task: **977** (no regression). Phase 6 net additions: 139 tests (89 planned unit + 15 planned integration + 4 planned fc properties + 3 sanity-check tests in the property suite + 28 unanticipated unit-test additions across phases) and 4 benchmark cases (3 planned + the second `guardDispose` variant for the read-only-method dispatch path).
 
 ---
 

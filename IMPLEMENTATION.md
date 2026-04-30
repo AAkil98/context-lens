@@ -168,7 +168,7 @@ context-lens/
 | **5** | Enrichments | `serialization`, `schemas/*`, `fleet`, `otel` | 11, 12, 13, 14 | `I-05` |
 | **6** | Instance lifecycle (v0.2.0) | `lifecycle`, modifications to `errors`, `events`, `index`, `fleet`, `otel` | 15, 07/12/13/14 amendments | `I-06` |
 
-Phases 1–5 ship in v0.1.0. Phase 6 is the first v0.2.0 phase; it adds `dispose()`, `isDisposed`, `isDisposing`, the `stateDisposed` event, `DisposedError` / `DisposalError`, and the integration registry that lets fleets and OTel exporters auto-detach on instance disposal. Each phase produces independently testable modules. No phase ships partial modules.
+Phases 1–5 shipped in v0.1.0 (npm 2026-04-09). Phase 6 is complete and ships as v0.2.0; it adds `dispose()`, `isDisposed`, `isDisposing`, `instanceId`, the `stateDisposed` event, `DisposedError` / `DisposalError`, and the integration registry that lets fleets and OTel exporters auto-detach on instance disposal. Each phase produces independently testable modules. No phase ships partial modules.
 
 ---
 
