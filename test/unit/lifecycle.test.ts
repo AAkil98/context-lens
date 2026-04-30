@@ -1,7 +1,14 @@
-import { describe, it, expect } from 'vitest';
-import { IntegrationRegistry, READ_ONLY_METHODS, guardDispose } from '../../src/lifecycle.js';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  IntegrationRegistry,
+  READ_ONLY_METHODS,
+  guardDispose,
+  runTeardown,
+  type TeardownContext,
+} from '../../src/lifecycle.js';
 import { DisposedError } from '../../src/errors.js';
-import type { IntegrationHandle } from '../../src/types.js';
+import { EventEmitter, type ContextLensEventMap, type StateDisposedEvent } from '../../src/events.js';
+import type { IntegrationHandle, LifecycleState } from '../../src/types.js';
 
 interface FakeInstance {
   tag: string;
@@ -313,5 +320,218 @@ describe('guardDispose', () => {
     // explicit opt-in only.
     expect(() => guardDispose('disposing', 'futureMethod', 'cl-1-abc123')).toThrow(DisposedError);
     expect(() => guardDispose('disposing', '', 'cl-1-abc123')).toThrow(DisposedError);
+  });
+});
+
+// ─── runTeardown orchestrator (impl-spec I-06 §4.1.5) ──────────────
+
+interface TeardownProbe {
+  emitter: EventEmitter<ContextLensEventMap>;
+  registry: IntegrationRegistry<FakeInstance>;
+  state: { current: LifecycleState };
+  sequence: string[];
+  payloadFactoryCalls: number;
+  ctx: TeardownContext<FakeInstance>;
+}
+
+function makeTeardownProbe(): TeardownProbe {
+  const emitter = new EventEmitter<ContextLensEventMap>();
+  const registry = new IntegrationRegistry<FakeInstance>();
+  const state: { current: LifecycleState } = { current: 'live' };
+  const sequence: string[] = [];
+  let payloadFactoryCalls = 0;
+
+  const ctx: TeardownContext<FakeInstance> = {
+    setState: (s) => {
+      sequence.push(`setState:${s}`);
+      state.current = s;
+    },
+    emitter,
+    integrations: registry,
+    clearResources: () => {
+      sequence.push('clearResources');
+    },
+    instance: { tag: 'fake' },
+    payloadFactory: () => {
+      payloadFactoryCalls++;
+      return Object.freeze({
+        type: 'stateDisposed' as const,
+        instanceId: 'cl-1-abc123',
+        timestamp: 1234567890,
+      });
+    },
+  };
+
+  return { emitter, registry, state, sequence, get payloadFactoryCalls() { return payloadFactoryCalls; }, ctx } as TeardownProbe;
+}
+
+describe('runTeardown — step ordering', () => {
+  it('runs the six steps in fixed order', () => {
+    const probe = makeTeardownProbe();
+    probe.emitter.on('stateDisposed', () => probe.sequence.push('handler'));
+    probe.registry.attach(() => probe.sequence.push('integration'));
+
+    runTeardown(probe.ctx);
+
+    expect(probe.sequence).toEqual([
+      'setState:disposing',  // Step 1
+      'handler',             // Step 2 — emitCollect dispatched stateDisposed
+      'integration',         // Step 3 — invokeAll dispatched the integration callback
+      'clearResources',      // Step 4
+      'setState:disposed',   // Step 6 (step 5 is silent — verified via post-conditions)
+    ]);
+  });
+
+  it('final lifecycle state is "disposed" after teardown returns', () => {
+    const probe = makeTeardownProbe();
+    runTeardown(probe.ctx);
+    expect(probe.state.current).toBe('disposed');
+  });
+
+  it('all four library-internal steps still run when callbacks throw', () => {
+    const probe = makeTeardownProbe();
+    probe.emitter.on('stateDisposed', () => { throw new Error('handler-boom'); });
+    probe.registry.attach(() => { throw new Error('integration-boom'); });
+
+    runTeardown(probe.ctx);
+
+    expect(probe.sequence).toContain('clearResources');
+    expect(probe.state.current).toBe('disposed');
+  });
+});
+
+describe('runTeardown — step 2 (stateDisposed dispatch)', () => {
+  it('invokes payloadFactory exactly once', () => {
+    const probe = makeTeardownProbe();
+    probe.emitter.on('stateDisposed', () => {});
+    runTeardown(probe.ctx);
+    expect(probe.payloadFactoryCalls).toBe(1);
+  });
+
+  it('delivers the frozen payload to handlers', () => {
+    const probe = makeTeardownProbe();
+    let received: StateDisposedEvent | null = null;
+    probe.emitter.on('stateDisposed', (p) => { received = p; });
+
+    runTeardown(probe.ctx);
+
+    expect(received).not.toBeNull();
+    expect(received!.type).toBe('stateDisposed');
+    expect(received!.instanceId).toBe('cl-1-abc123');
+    expect(received!.timestamp).toBe(1234567890);
+    expect(Object.isFrozen(received!)).toBe(true);
+  });
+
+  it('captures handler errors and tags them with origin="handler"', () => {
+    const probe = makeTeardownProbe();
+    const e1 = new Error('h1');
+    const e2 = new Error('h2');
+    probe.emitter.on('stateDisposed', () => { throw e1; });
+    probe.emitter.on('stateDisposed', () => { /* ok */ });
+    probe.emitter.on('stateDisposed', () => { throw e2; });
+
+    const errorLog = runTeardown(probe.ctx);
+
+    expect(errorLog).toHaveLength(2);
+    expect((errorLog[0] as { origin: string; index: number; cause: unknown }).origin).toBe('handler');
+    expect((errorLog[0] as { index: number }).index).toBe(0);
+    expect((errorLog[0] as { cause: unknown }).cause).toBe(e1);
+    expect((errorLog[1] as { origin: string; index: number; cause: unknown }).origin).toBe('handler');
+    expect((errorLog[1] as { index: number }).index).toBe(1);
+    expect((errorLog[1] as { cause: unknown }).cause).toBe(e2);
+  });
+});
+
+describe('runTeardown — step 3 (integration teardown)', () => {
+  it('invokes integration callbacks with the instance reference', () => {
+    const probe = makeTeardownProbe();
+    let receivedInstance: FakeInstance | null = null;
+    probe.registry.attach((inst) => { receivedInstance = inst; });
+
+    runTeardown(probe.ctx);
+
+    expect(receivedInstance).toBe(probe.ctx.instance);
+  });
+
+  it('captures integration errors and tags them with origin="integration"', () => {
+    const probe = makeTeardownProbe();
+    const e1 = new Error('i1');
+    const e2 = new Error('i2');
+    probe.registry.attach(() => { throw e1; });
+    probe.registry.attach(() => { /* ok */ });
+    probe.registry.attach(() => { throw e2; });
+
+    const errorLog = runTeardown(probe.ctx);
+
+    expect(errorLog).toHaveLength(2);
+    expect((errorLog[0] as { origin: string; index: number }).origin).toBe('integration');
+    expect((errorLog[0] as { index: number }).index).toBe(0);
+    expect((errorLog[1] as { origin: string; index: number }).origin).toBe('integration');
+    expect((errorLog[1] as { index: number }).index).toBe(1);
+  });
+});
+
+describe('runTeardown — step 5 (registry detachment)', () => {
+  it('emitter has no handlers after teardown — pre-existing handlers cannot fire', () => {
+    const probe = makeTeardownProbe();
+    const segmentAddedSpy = vi.fn();
+    probe.emitter.on('segmentAdded', segmentAddedSpy);
+
+    runTeardown(probe.ctx);
+
+    // After teardown, the pre-attached handler is gone.
+    probe.emitter.emit('segmentAdded', { segment: { id: 'x' } as never });
+    expect(segmentAddedSpy).not.toHaveBeenCalled();
+  });
+
+  it('integration registry size is 0 after teardown', () => {
+    const probe = makeTeardownProbe();
+    probe.registry.attach(() => {});
+    probe.registry.attach(() => {});
+    probe.registry.attach(() => {});
+
+    runTeardown(probe.ctx);
+
+    expect(probe.registry.size).toBe(0);
+  });
+});
+
+describe('runTeardown — error aggregation', () => {
+  it('produces empty errorLog when no callbacks throw', () => {
+    const probe = makeTeardownProbe();
+    probe.emitter.on('stateDisposed', () => {});
+    probe.registry.attach(() => {});
+
+    const errorLog = runTeardown(probe.ctx);
+
+    expect(errorLog).toEqual([]);
+  });
+
+  it('runs cleanly with no handlers and no integrations', () => {
+    const probe = makeTeardownProbe();
+    const errorLog = runTeardown(probe.ctx);
+    expect(errorLog).toEqual([]);
+    expect(probe.state.current).toBe('disposed');
+  });
+
+  it('orders mixed handler+integration errors as handlers-first, integrations-second', () => {
+    const probe = makeTeardownProbe();
+    const h1 = new Error('h1');
+    const i1 = new Error('i1');
+    const i2 = new Error('i2');
+    probe.emitter.on('stateDisposed', () => { throw h1; });
+    probe.registry.attach(() => { throw i1; });
+    probe.registry.attach(() => { throw i2; });
+
+    const errorLog = runTeardown(probe.ctx);
+
+    expect(errorLog).toHaveLength(3);
+    expect((errorLog[0] as { origin: string }).origin).toBe('handler');
+    expect((errorLog[1] as { origin: string }).origin).toBe('integration');
+    expect((errorLog[2] as { origin: string }).origin).toBe('integration');
+    // Indices are origin-relative: handler index 0, integration indices 0 and 1.
+    expect((errorLog[0] as { index: number }).index).toBe(0);
+    expect((errorLog[1] as { index: number }).index).toBe(0);
+    expect((errorLog[2] as { index: number }).index).toBe(1);
   });
 });

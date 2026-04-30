@@ -237,6 +237,51 @@ describe('EventEmitter', () => {
       expect(after).toHaveBeenCalledOnce();
     });
   });
+
+  describe('removeAllListeners', () => {
+    it('detaches every handler from every event', () => {
+      const emitter = new EventEmitter<TestEventMap>();
+      const fooA = vi.fn();
+      const fooB = vi.fn();
+      const bar = vi.fn();
+
+      emitter.on('foo', fooA);
+      emitter.on('foo', fooB);
+      emitter.on('bar', bar);
+
+      emitter.removeAllListeners();
+
+      emitter.emit('foo', { value: 1 });
+      emitter.emit('bar', { msg: 'hi' });
+
+      expect(fooA).not.toHaveBeenCalled();
+      expect(fooB).not.toHaveBeenCalled();
+      expect(bar).not.toHaveBeenCalled();
+    });
+
+    it('is idempotent — repeated calls do not throw', () => {
+      const emitter = new EventEmitter<TestEventMap>();
+      emitter.on('foo', vi.fn());
+      expect(() => {
+        emitter.removeAllListeners();
+        emitter.removeAllListeners();
+        emitter.removeAllListeners();
+      }).not.toThrow();
+    });
+
+    it('the emitter remains functional for new subscriptions', () => {
+      const emitter = new EventEmitter<TestEventMap>();
+      emitter.on('foo', vi.fn());
+      emitter.removeAllListeners();
+
+      const after = vi.fn();
+      emitter.on('foo', after);
+      emitter.emit('foo', { value: 7 });
+
+      expect(after).toHaveBeenCalledOnce();
+      expect(after).toHaveBeenCalledWith({ value: 7 });
+    });
+  });
 });
 
 // ─── ContextLensEventMap / StateDisposedEvent (cl-spec-015 §7.1) ────

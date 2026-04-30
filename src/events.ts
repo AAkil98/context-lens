@@ -139,4 +139,14 @@ export class EventEmitter<TMap> {
       this.emitting = false;
     }
   }
+
+  /**
+   * Detach every handler from every event. Used by the teardown orchestrator
+   * during step 5 of cl-spec-015 §4.1 to release the registry's strong
+   * references to handler closures. Idempotent — repeated calls are no-ops.
+   * @see cl-spec-015 §4.1
+   */
+  removeAllListeners(): void {
+    this.handlers.clear();
+  }
 }

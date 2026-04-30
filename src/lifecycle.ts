@@ -10,7 +10,8 @@
  * @internal
  */
 
-import { DisposedError } from './errors.js';
+import { DisposedError, tagOrigin } from './errors.js';
+import type { EventEmitter, ContextLensEventMap, StateDisposedEvent } from './events.js';
 import type { IntegrationTeardown, IntegrationHandle, LifecycleState } from './types.js';
 
 interface IntegrationEntry<T> {
@@ -131,4 +132,87 @@ export function guardDispose(
   if (state === 'disposing' && !READ_ONLY_METHODS.has(methodName)) {
     throw new DisposedError(instanceId, methodName, 'disposing');
   }
+}
+
+// ─── Teardown orchestrator (impl-spec I-06 §4.1.5) ─────────────────
+
+/**
+ * Runtime context passed to {@link runTeardown}. Every field is supplied by
+ * the owning ContextLens instance; the orchestrator itself is stateless.
+ *
+ * @internal
+ */
+export interface TeardownContext<T = unknown> {
+  /** Setter that mutates the lifecycle state on the owning instance. */
+  setState: (state: LifecycleState) => void;
+  /** Live event emitter — dispatched via `emitCollect` for `stateDisposed`. */
+  emitter: EventEmitter<ContextLensEventMap>;
+  /** Live integration registry — `invokeAll` is called in step 3. */
+  integrations: IntegrationRegistry<T>;
+  /** Callback that clears the instance's owned resources during step 4. */
+  clearResources: () => void;
+  /** Instance reference passed to integration teardown callbacks in step 3. */
+  instance: T;
+  /**
+   * Factory that produces the frozen `stateDisposed` payload. Invoked once,
+   * by the orchestrator, at the entry to step 2 — so the timestamp is
+   * captured precisely at the moment the event fires.
+   */
+  payloadFactory: () => StateDisposedEvent;
+}
+
+/**
+ * Execute the six-step teardown sequence from cl-spec-015 §4.1 in fixed order.
+ * Returns the per-call disposal error log; the caller (`ContextLens.dispose`)
+ * inspects it and throws `DisposalError` if non-empty.
+ *
+ * Steps:
+ * 1. setState('disposing') — disposing flag set; mutating methods now throw.
+ * 2. emitter.emitCollect('stateDisposed', payload, errorLog) — handler errors
+ *    are tagged with origin='handler' before remaining in the log.
+ * 3. integrations.invokeAll(instance, errorLog) — integration teardown
+ *    callback errors are tagged with origin='integration'.
+ * 4. clearResources() — library-internal; cannot fail.
+ * 5. emitter.removeAllListeners() + integrations.clear() — registry detachment.
+ * 6. setState('disposed') — single commit point.
+ *
+ * Library-internal steps (1, 4, 5, 6) are infallible by construction. Caller-
+ * supplied callback errors in steps 2 and 3 are absorbed and aggregated; they
+ * never abort teardown.
+ *
+ * @see cl-spec-015 §4.1, §4.3
+ * @internal
+ */
+export function runTeardown<T>(ctx: TeardownContext<T>): unknown[] {
+  const errorLog: unknown[] = [];
+
+  // Step 1: set the disposing flag (mutating methods now throw via guardDispose).
+  ctx.setState('disposing');
+
+  // Step 2: emit stateDisposed; tag handler errors with origin='handler'.
+  const handlerStart = errorLog.length;
+  const payload = ctx.payloadFactory();
+  ctx.emitter.emitCollect('stateDisposed', payload, errorLog);
+  for (let i = handlerStart; i < errorLog.length; i++) {
+    errorLog[i] = tagOrigin(errorLog[i], 'handler', i - handlerStart);
+  }
+
+  // Step 3: invoke integration teardown callbacks; tag errors with origin='integration'.
+  const integrationStart = errorLog.length;
+  ctx.integrations.invokeAll(ctx.instance, errorLog);
+  for (let i = integrationStart; i < errorLog.length; i++) {
+    errorLog[i] = tagOrigin(errorLog[i], 'integration', i - integrationStart);
+  }
+
+  // Step 4: clear instance-owned resources (library-internal; infallible).
+  ctx.clearResources();
+
+  // Step 5: detach handler registry; clear integration registry.
+  ctx.emitter.removeAllListeners();
+  ctx.integrations.clear();
+
+  // Step 6: set the disposed flag — single commit point of the lifecycle.
+  ctx.setState('disposed');
+
+  return errorLog;
 }
