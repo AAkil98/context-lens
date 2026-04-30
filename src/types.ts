@@ -795,3 +795,31 @@ export interface FleetReport {
   ranking: RankedInstance[];
   capacityOverview: FleetCapacity;
 }
+
+// ─── Lifecycle Domain ─────────────────────────────────────────────
+// @see cl-spec-015
+
+/**
+ * Two-state lifecycle from cl-spec-015 §2 plus the transient `disposing`
+ * observable from §2.5. The lifecycle graph is two-valued; `disposing` is a
+ * during-teardown probe, not a third state.
+ */
+export type LifecycleState = 'live' | 'disposing' | 'disposed';
+
+/**
+ * Teardown callback registered by lifecycle-aware integrations (fleet,
+ * exporter). Invoked synchronously during step 3 of teardown with the live
+ * instance; throwing is permitted and absorbed into the disposal error log.
+ * @see cl-spec-015 §6.2
+ */
+export type IntegrationTeardown<T = unknown> = (instance: T) => void;
+
+/**
+ * Handle returned by `attachIntegration`. Calling `detach()` removes the
+ * teardown callback from the instance's integration registry without firing
+ * it. Idempotent — repeated calls are no-ops.
+ * @see cl-spec-015 §6.2
+ */
+export interface IntegrationHandle {
+  detach(): void;
+}
