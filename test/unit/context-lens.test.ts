@@ -1194,3 +1194,53 @@ describe('ContextLens — Cache Invalidation After Mutations', () => {
     expect(r2.reportId).not.toBe(r1.reportId);
   });
 });
+
+// ─── Lifecycle surface (cl-spec-015 §2.5, §6.2) ────────────────────
+
+describe('Lifecycle surface', () => {
+  it('instanceId matches the documented cl-N-xxxxxx format', () => {
+    const lens = makeLens();
+    expect(lens.instanceId).toMatch(/^cl-\d+-[a-z0-9]+$/);
+  });
+
+  it('two instances get distinct instanceIds', () => {
+    const a = makeLens();
+    const b = makeLens();
+    expect(a.instanceId).not.toBe(b.instanceId);
+  });
+
+  it('instanceId is stable across reads', () => {
+    const lens = makeLens();
+    const first = lens.instanceId;
+    expect(lens.instanceId).toBe(first);
+    expect(lens.instanceId).toBe(first);
+  });
+
+  it('isDisposed returns false on a fresh instance', () => {
+    expect(makeLens().isDisposed).toBe(false);
+  });
+
+  it('isDisposing returns false on a fresh instance', () => {
+    expect(makeLens().isDisposing).toBe(false);
+  });
+
+  it('isDisposed and isDisposing are never simultaneously true on a live instance', () => {
+    const lens = makeLens();
+    expect(lens.isDisposed && lens.isDisposing).toBe(false);
+  });
+
+  it('attachIntegration returns a handle with an idempotent detach()', () => {
+    const lens = makeLens();
+    const handle = lens.attachIntegration(() => {});
+    expect(typeof handle.detach).toBe('function');
+    expect(() => {
+      handle.detach();
+      handle.detach();
+    }).not.toThrow();
+  });
+
+  it('attachIntegration on a live instance does not throw', () => {
+    const lens = makeLens();
+    expect(() => lens.attachIntegration(() => {})).not.toThrow();
+  });
+});

@@ -22,12 +22,16 @@ import type {
   BaselineSnapshot,
   SerializedState,
   SerializedConfig,
+  IntegrationTeardown,
+  IntegrationHandle,
+  LifecycleState,
 } from './types.js';
 import {
   ConfigurationError,
   ValidationError,
 } from './errors.js';
 import { EventEmitter, type ContextLensEventMap } from './events.js';
+import { IntegrationRegistry, guardDispose } from './lifecycle.js';
 import { Tokenizer } from './tokenizer.js';
 import { SegmentStore, type AddOptions, type UpdateChanges, type RestoreOptions, type CreateGroupOptions, type DuplicateSignal } from './segment-store.js';
 import { EmbeddingEngine } from './embedding.js';
@@ -71,6 +75,11 @@ export interface SeedInput {
   groupId?: string;
 }
 
+// ─── Module-level state ───────────────────────────────────────────
+
+/** Process-wide monotonic counter for {@link ContextLens.instanceId}. @see cl-spec-015 §2.5 */
+let INSTANCE_COUNTER = 0;
+
 // ─── ContextLens ──────────────────────────────────────────────────
 
 export class ContextLens {
@@ -98,6 +107,18 @@ export class ContextLens {
   private seeded = false;
   private hasAdds = false;
 
+  // ── Lifecycle (cl-spec-015) ─────────────────────────────────
+  private lifecycleState: LifecycleState = 'live';
+  private readonly integrations = new IntegrationRegistry<ContextLens>();
+  /**
+   * Stable instance identifier of the form `cl-N-xxxxxx`. Generated once at
+   * construction; valid in all lifecycle states (live, disposing, disposed).
+   * Same value flows to `stateDisposed` event payloads, `DisposedError`
+   * messages, and integration teardown notifications.
+   * @see cl-spec-015 §2.5, §7.1, §7.2
+   */
+  readonly instanceId: string;
+
   /**
    * Create a new ContextLens instance for monitoring a single context window.
    * @param config - Configuration with required `capacity` (token budget) and optional providers.
@@ -108,44 +129,47 @@ export class ContextLens {
     // Step 1: Validate config
     this.validateConfig(config);
 
-    // Step 2: Deep-copy config
+    // Step 2: Generate stable instance identifier (cl-spec-015 §2.5)
+    this.instanceId = `cl-${++INSTANCE_COUNTER}-${Math.random().toString(36).slice(2, 8)}`;
+
+    // Step 3: Deep-copy config
     this.configSnapshot = deepCopy(config);
     this.capacity = config.capacity;
 
-    // Step 3: Capture construction timestamp
+    // Step 4: Capture construction timestamp
     this.constructionTimestamp = Date.now();
 
-    // Step 4: Create event emitter
+    // Step 5: Create event emitter
     this.emitter = new EventEmitter<ContextLensEventMap>();
 
-    // Step 5: Create tokenizer
+    // Step 6: Create tokenizer
     this.tokenizer = new Tokenizer(
       config.tokenizer ?? 'approximate',
       undefined,
       config.tokenCacheSize ?? 4096,
     );
 
-    // Step 6: Create segment store
+    // Step 7: Create segment store
     this.store = new SegmentStore(
       this.tokenizer,
       this.emitter,
       config.retainEvictedContent ?? true,
     );
 
-    // Step 7: Create embedding engine
+    // Step 8: Create embedding engine
     this.embedding = new EmbeddingEngine(
       config.embeddingCacheSize ?? 4096,
       (content: string) => this.tokenizer.count(content),
     );
 
-    // Step 8: Create similarity engine
+    // Step 9: Create similarity engine
     this.similarity = new SimilarityEngine();
     this.similarity.setEmbeddingLookup(this.embedding);
 
-    // Step 9: Create task manager
+    // Step 10: Create task manager
     this.taskManager = new TaskManager();
 
-    // Step 10: Create scoring/report modules
+    // Step 11: Create scoring/report modules
     this.continuity = new ContinuityTracker();
     this.baseline = new BaselineManager();
     this.reportAssembler = new QualityReportAssembler(
@@ -156,7 +180,7 @@ export class ContextLens {
       this.baseline,
     );
 
-    // Step 11: Create detection engine
+    // Step 12: Create detection engine
     const detectionConfig: DetectionConfig = {};
     if (config.patternThresholds != null) detectionConfig.thresholds = config.patternThresholds;
     if (config.suppressedPatterns != null) detectionConfig.suppressedPatterns = config.suppressedPatterns;
@@ -164,16 +188,16 @@ export class ContextLens {
     if (config.customPatterns != null) detectionConfig.customPatterns = config.customPatterns;
     this.detection = new DetectionEngine(detectionConfig);
 
-    // Step 12: Create eviction advisory
+    // Step 13: Create eviction advisory
     this.evictionAdvisory = new EvictionAdvisory({
       store: this.store,
       similarity: this.similarity,
     });
 
-    // Step 13: Create performance module
+    // Step 14: Create performance module
     this.perf = new PerformanceInstrumentation();
 
-    // Step 14: Create diagnostics module
+    // Step 15: Create diagnostics module
     this.diagnosticsManager = new DiagnosticsManager({
       emitter: this.emitter,
       perf: this.perf,
@@ -219,6 +243,35 @@ export class ContextLens {
     if (config.retainEvictedContent !== undefined && typeof config.retainEvictedContent !== 'boolean') {
       throw new ConfigurationError('retainEvictedContent must be a boolean');
     }
+  }
+
+  // ── Lifecycle (cl-spec-015 §2.5, §6.2) ──────────────────────────
+
+  /** True once `dispose()` has completed successfully. Never throws. */
+  get isDisposed(): boolean {
+    return this.lifecycleState === 'disposed';
+  }
+
+  /** True while a `dispose()` call is on the stack. Never throws. */
+  get isDisposing(): boolean {
+    return this.lifecycleState === 'disposing';
+  }
+
+  /**
+   * Attach a lifecycle-aware integration's teardown callback. Internal entry
+   * point for `ContextLensFleet` (cl-spec-012) and `ContextLensExporter`
+   * (cl-spec-013); not part of the documented public API.
+   *
+   * Returns an `IntegrationHandle` whose `detach()` removes the callback
+   * without firing it. Throws `DisposedError` if the instance is disposed
+   * or currently disposing.
+   *
+   * @internal
+   * @see cl-spec-015 §6.2
+   */
+  attachIntegration(callback: IntegrationTeardown<ContextLens>): IntegrationHandle {
+    guardDispose(this.lifecycleState, 'attachIntegration', this.instanceId);
+    return this.integrations.attach(callback);
   }
 
   // ── Segment Operations ──────────────────────────────────────────
