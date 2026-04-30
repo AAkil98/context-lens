@@ -1148,7 +1148,7 @@ export {
 } from './errors.js';
 
 // Event map type — consumers need this for typed event handlers
-export type { ContextLensEventMap } from './events.js';
+export type { ContextLensEventMap, StateDisposedEvent } from './events.js';
 
 // Types from internal modules used in public method signatures
 export type { AddOptions, UpdateChanges, RestoreOptions, CreateGroupOptions, DuplicateSignal } from './segment-store.js';
