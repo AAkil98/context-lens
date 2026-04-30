@@ -12,6 +12,7 @@ import {
   ProtectionError,
   CompactionError,
   RestoreError,
+  DisposedError,
 } from '../../src/errors.js';
 import type {
   Segment,
@@ -1242,5 +1243,71 @@ describe('Lifecycle surface', () => {
   it('attachIntegration on a live instance does not throw', () => {
     const lens = makeLens();
     expect(() => lens.attachIntegration(() => {})).not.toThrow();
+  });
+});
+
+// ─── Disposed-state guard wiring (cl-spec-015 §3.4, §5.1) ──────────
+//
+// T10 wires guardDispose into every public method but the live path is
+// unchanged. These tests force the lifecycle state via a private-field
+// cast to verify the guard arms correctly. T11 will exercise the same
+// behavior through the real dispose() method, and T15 covers exhaustive
+// post-disposal property-based coverage.
+
+describe('Disposed-state guard wiring', () => {
+  function forceState(lens: ContextLens, state: 'disposed' | 'disposing'): void {
+    (lens as unknown as { lifecycleState: string }).lifecycleState = state;
+  }
+
+  it('mutating methods throw DisposedError when state is "disposed"', () => {
+    const lens = makeLens();
+    forceState(lens, 'disposed');
+    expect(() => lens.add('x')).toThrow(DisposedError);
+    expect(() => lens.setCapacity(5000)).toThrow(DisposedError);
+    expect(() => lens.on('segmentAdded', () => {})).toThrow(DisposedError);
+    expect(() => lens.attachIntegration(() => {})).toThrow(DisposedError);
+  });
+
+  it('read-only methods also throw DisposedError when state is "disposed"', () => {
+    const lens = makeLens();
+    forceState(lens, 'disposed');
+    expect(() => lens.getCapacity()).toThrow(DisposedError);
+    expect(() => lens.getSegmentCount()).toThrow(DisposedError);
+    expect(() => lens.assess()).toThrow(DisposedError);
+    expect(() => lens.snapshot()).toThrow(DisposedError);
+    expect(() => lens.getDiagnostics()).toThrow(DisposedError);
+  });
+
+  it('mutating methods throw DisposedError when state is "disposing"', () => {
+    const lens = makeLens();
+    forceState(lens, 'disposing');
+    expect(() => lens.add('x')).toThrow(DisposedError);
+    expect(() => lens.setCapacity(5000)).toThrow(DisposedError);
+    expect(() => lens.attachIntegration(() => {})).toThrow(DisposedError);
+  });
+
+  it('read-only methods do NOT throw when state is "disposing"', () => {
+    const lens = makeLens();
+    lens.add('seed-content');  // populate something so reads have data
+    forceState(lens, 'disposing');
+    expect(() => lens.getCapacity()).not.toThrow();
+    expect(() => lens.getSegmentCount()).not.toThrow();
+    expect(() => lens.assess()).not.toThrow();
+    expect(() => lens.snapshot()).not.toThrow();
+  });
+
+  it('thrown DisposedError carries instanceId and the attempted method name', () => {
+    const lens = makeLens();
+    const id = lens.instanceId;
+    forceState(lens, 'disposed');
+    try {
+      lens.add('x');
+      expect.fail('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(DisposedError);
+      const err = e as DisposedError;
+      expect(err.instanceId).toBe(id);
+      expect(err.attemptedMethod).toBe('add');
+    }
   });
 });

@@ -283,6 +283,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   seed(segments: SeedInput[]): Segment[] {
+    guardDispose(this.lifecycleState, 'seed', this.instanceId);
     if (segments.length === 0) return [];
 
     // Defensive copy
@@ -335,6 +336,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   add(content: string, options?: AddOptions): Segment | DuplicateSignal {
+    guardDispose(this.lifecycleState, 'add', this.instanceId);
     const opts = options !== undefined ? deepCopy(options) : undefined;
 
     // First add after seed: capture baseline
@@ -365,6 +367,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   update(id: string, changes: UpdateChanges): Segment {
+    guardDispose(this.lifecycleState, 'update', this.instanceId);
     const changesCopy = deepCopy(changes);
     const result = this.store.update(id, changesCopy);
 
@@ -386,6 +389,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   replace(id: string, newContent: string, options?: Partial<Pick<AddOptions, 'importance' | 'origin' | 'tags'>>): Segment {
+    guardDispose(this.lifecycleState, 'replace', this.instanceId);
     const opts = options !== undefined ? deepCopy(options) : undefined;
     const result = this.store.replace(id, newContent, opts);
 
@@ -406,6 +410,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   compact(id: string, summary: string): Segment {
+    guardDispose(this.lifecycleState, 'compact', this.instanceId);
     const seg = this.store.getSegment(id);
     const prevTokenCount = seg?.tokenCount ?? 0;
 
@@ -439,6 +444,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   split(id: string, splitFn: (content: string) => string[]): Segment[] {
+    guardDispose(this.lifecycleState, 'split', this.instanceId);
     const results = this.store.split(id, splitFn);
 
     // Prepare embeddings for children
@@ -461,6 +467,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   evict(id: string, reason?: string): EvictionRecord | EvictionRecord[] {
+    guardDispose(this.lifecycleState, 'evict', this.instanceId);
     const records = this.store.evict(id, reason);
 
     // Record each eviction in continuity ledger
@@ -489,6 +496,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   restore(id: string, options?: RestoreOptions): Segment | Segment[] {
+    guardDispose(this.lifecycleState, 'restore', this.instanceId);
     const opts = options !== undefined ? deepCopy(options) : undefined;
     const results = this.store.restore(id, opts);
 
@@ -520,6 +528,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.2
    */
   createGroup(groupId: string, segmentIds: string[], options?: CreateGroupOptions): Group {
+    guardDispose(this.lifecycleState, 'createGroup', this.instanceId);
     const opts = options !== undefined ? deepCopy(options) : undefined;
     const result = this.store.createGroup(groupId, segmentIds, opts);
     return deepCopy(result);
@@ -531,6 +540,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.2
    */
   dissolveGroup(groupId: string): Segment[] {
+    guardDispose(this.lifecycleState, 'dissolveGroup', this.instanceId);
     const group = this.store.getGroup(groupId);
     if (group === undefined) {
       throw new ValidationError(`Group not found: ${groupId}`);
@@ -542,12 +552,14 @@ export class ContextLens {
 
   /** Get a group by ID. Returns null if not found. */
   getGroup(groupId: string): Group | null {
+    guardDispose(this.lifecycleState, 'getGroup', this.instanceId);
     const group = this.store.getGroup(groupId);
     return group !== undefined ? deepCopy(group) : null;
   }
 
   /** List all active groups. */
   listGroups(): Group[] {
+    guardDispose(this.lifecycleState, 'listGroups', this.instanceId);
     return this.store.listGroups().map(g => deepCopy(g));
   }
 
@@ -555,22 +567,26 @@ export class ContextLens {
 
   /** Get a segment by ID (active or evicted). Returns null if not found. */
   getSegment(id: string): Segment | null {
+    guardDispose(this.lifecycleState, 'getSegment', this.instanceId);
     const seg = this.store.getSegment(id);
     return seg !== undefined ? deepCopy(seg) : null;
   }
 
   /** Get count of active segments. */
   getSegmentCount(): number {
+    guardDispose(this.lifecycleState, 'getSegmentCount', this.instanceId);
     return this.store.segmentCount;
   }
 
   /** List all active segments in order. */
   listSegments(): Segment[] {
+    guardDispose(this.lifecycleState, 'listSegments', this.instanceId);
     return this.store.getOrderedActiveSegments().map(s => deepCopy(s));
   }
 
   /** Get current capacity metrics. */
   getCapacity(): CapacityReport {
+    guardDispose(this.lifecycleState, 'getCapacity', this.instanceId);
     return deepCopy(this.computeCapacity());
   }
 
@@ -582,6 +598,7 @@ export class ContextLens {
     event: E,
     handler: (payload: ContextLensEventMap[E]) => void,
   ): () => void {
+    guardDispose(this.lifecycleState, 'on', this.instanceId);
     return this.emitter.on(event, handler);
   }
 
@@ -595,6 +612,7 @@ export class ContextLens {
    * @see cl-spec-003 (degradation patterns)
    */
   assess(): QualityReport {
+    guardDispose(this.lifecycleState, 'assess', this.instanceId);
     // Step 1: Check cache
     if (this.qualityCacheValid && this.cachedReport !== null) {
       return deepCopy(this.cachedReport);
@@ -656,6 +674,7 @@ export class ContextLens {
    * @see cl-spec-008
    */
   planEviction(options?: PlanOptions): EvictionPlan {
+    guardDispose(this.lifecycleState, 'planEviction', this.instanceId);
     // Ensure a report exists
     if (this.cachedReport === null) {
       this.assess();
@@ -679,6 +698,7 @@ export class ContextLens {
    * @see cl-spec-004
    */
   async setTask(descriptor: TaskDescriptor): Promise<TaskTransition> {
+    guardDispose(this.lifecycleState, 'setTask', this.instanceId);
     const desc = deepCopy(descriptor);
     const transition = await this.taskManager.setTask(desc, this.similarity, this.embedding);
 
@@ -695,6 +715,7 @@ export class ContextLens {
 
   /** Clear the current task. */
   clearTask(): void {
+    guardDispose(this.lifecycleState, 'clearTask', this.instanceId);
     if (!this.taskManager.isActive()) return;
 
     this.taskManager.clearTask();
@@ -705,12 +726,14 @@ export class ContextLens {
 
   /** Get the current task descriptor, or null. */
   getTask(): TaskDescriptor | null {
+    guardDispose(this.lifecycleState, 'getTask', this.instanceId);
     const task = this.taskManager.getCurrentTask();
     return task !== null ? deepCopy(task) : null;
   }
 
   /** Get full task lifecycle state. */
   getTaskState(): TaskState {
+    guardDispose(this.lifecycleState, 'getTaskState', this.instanceId);
     return deepCopy(this.taskManager.getState());
   }
 
@@ -721,6 +744,7 @@ export class ContextLens {
    * @see cl-spec-006
    */
   setTokenizer(provider: TokenizerProvider | 'approximate', metadata?: TokenizerMetadata): void {
+    guardDispose(this.lifecycleState, 'setTokenizer', this.instanceId);
     const result = this.tokenizer.switchProvider(provider, metadata, {
       getActiveSegments: () => this.store.getActiveSegmentIterator(),
       setSegmentTokenCount: (id: string, tokenCount: number) => {
@@ -742,6 +766,7 @@ export class ContextLens {
     provider: EmbeddingProvider | null,
     metadata?: EmbeddingProviderMetadata,
   ): Promise<void> {
+    guardDispose(this.lifecycleState, 'setEmbeddingProvider', this.instanceId);
     if (provider === null) {
       const result = this.embedding.removeProvider(() => {
         this.similarity.clearCache();
@@ -765,11 +790,13 @@ export class ContextLens {
 
   /** Get tokenizer info. */
   getTokenizerInfo(): TokenizerMetadata {
+    guardDispose(this.lifecycleState, 'getTokenizerInfo', this.instanceId);
     return deepCopy(this.tokenizer.getInfo());
   }
 
   /** Get embedding provider info, or null if in trigram mode. */
   getEmbeddingProviderInfo(): EmbeddingProviderMetadata | null {
+    guardDispose(this.lifecycleState, 'getEmbeddingProviderInfo', this.instanceId);
     const meta = this.embedding.getProviderMetadata();
     return meta !== null ? deepCopy(meta) : null;
   }
@@ -778,6 +805,7 @@ export class ContextLens {
 
   /** Update the token capacity. */
   setCapacity(newCapacity: number): void {
+    guardDispose(this.lifecycleState, 'setCapacity', this.instanceId);
     if (!Number.isInteger(newCapacity) || newCapacity <= 0) {
       throw new ValidationError('Capacity must be a positive integer', { capacity: newCapacity });
     }
@@ -797,6 +825,7 @@ export class ContextLens {
    * @see cl-spec-003 §10
    */
   registerPattern(definition: PatternDefinition): void {
+    guardDispose(this.lifecycleState, 'registerPattern', this.instanceId);
     const def = deepCopy(definition);
     this.detection.registerPattern(def);
     this.emitter.emit('customPatternRegistered', { name: def.name, description: def.description });
@@ -806,6 +835,7 @@ export class ContextLens {
 
   /** Get the quality baseline snapshot, or null if not captured. */
   getBaseline(): BaselineSnapshot | null {
+    guardDispose(this.lifecycleState, 'getBaseline', this.instanceId);
     const snap = this.baseline.getSnapshot();
     return snap !== null ? deepCopy(snap) : null;
   }
@@ -816,31 +846,37 @@ export class ContextLens {
    * @see cl-spec-010
    */
   getDiagnostics(): DiagnosticSnapshot {
+    guardDispose(this.lifecycleState, 'getDiagnostics', this.instanceId);
     return this.diagnosticsManager.getDiagnostics();
   }
 
   /** Get the session start timestamp. */
   getConstructionTimestamp(): number {
+    guardDispose(this.lifecycleState, 'getConstructionTimestamp', this.instanceId);
     return this.constructionTimestamp;
   }
 
   /** Get the config used to construct this instance. */
   getConfig(): ContextLensConfig {
+    guardDispose(this.lifecycleState, 'getConfig', this.instanceId);
     return deepCopy(this.configSnapshot);
   }
 
   /** Get evicted segments. */
   getEvictedSegments(): Segment[] {
+    guardDispose(this.lifecycleState, 'getEvictedSegments', this.instanceId);
     return this.store.getEvictedSegments().map(s => deepCopy(s));
   }
 
   /** Get performance instrumentation module (for diagnostics). */
   getPerformance(): PerformanceInstrumentation {
+    guardDispose(this.lifecycleState, 'getPerformance', this.instanceId);
     return this.perf;
   }
 
   /** Get detection engine (for diagnostics). */
   getDetection(): DetectionEngine {
+    guardDispose(this.lifecycleState, 'getDetection', this.instanceId);
     return this.detection;
   }
 
@@ -918,6 +954,7 @@ export class ContextLens {
    * @see cl-spec-014
    */
   snapshot(options?: { includeContent?: boolean }): SerializedState {
+    guardDispose(this.lifecycleState, 'snapshot', this.instanceId);
     const includeContent = options?.includeContent ?? true;
     const now = Date.now();
     const restorable = includeContent;
