@@ -271,7 +271,7 @@ Grill outcomes (2026-04-29) — three decisions applied to the spec; status flip
 
 ## Current state
 
-**v0.1.0 shipped to npm 2026-04-09. v0.2.0 design complete; Phase 6 implementation pending on `feat/dispose-lifecycle`.**
+**v0.1.0 shipped to npm 2026-04-09. v0.2.0 Phase 6 implementation in progress on `feat/dispose-lifecycle` — T1–T10 of 17 tasks complete; T11–T17 pending. Lifecycle infrastructure fully scaffolded but dormant until `dispose()` lands in T11.**
 
 v0.1.0 baseline:
 - 33/33 build tasks done across 5 phases (~10,200 source LOC, ~15,500 test LOC)
@@ -281,8 +281,30 @@ v0.1.0 baseline:
 v0.2.0 design (this branch):
 - cl-spec-015 (Instance Lifecycle) added; cl-spec-005/006/007/012/013/014 amended for cross-cutting integration
 - 15 design-spec invariants in cl-spec-015 covering state machine, dispose contract, teardown atomicity, post-disposal access, events/errors, integrations/providers, stable identity
-- `impl/I-06-lifecycle.md` drafted (~543 lines) covering Phase 6 build plan
-- Nine commits ahead of `main`: eight from this session + one prior planning commit
+- `impl/I-06-lifecycle.md` (~570 lines, amended in T2 + T6 with `emitCollect` contract and `READ_ONLY_METHODS` audit results) covering Phase 6 build plan
+- `IMPL_JOURNAL.md` — canonical Phase 6 task tracker (17 tasks; T1–T10 done, T11–T17 pending)
+
+v0.2.0 Phase 6 progress (19 commits ahead of `main`):
+- **T1** (`9d9d1ee`) — `IMPL_JOURNAL.md` recreated as v0.2.0 phase tracker
+- **T2** (`0e379d6`) — impl-spec amendment: `EventEmitter.emitCollect` contract for `stateDisposed` dispatch (standard `emit` swallows handler errors per cl-spec-007 §10.3, so the orchestrator needs a different dispatch path)
+- **T3** (`d387ffa`) — `DisposedError extends Error`, `DisposalError extends AggregateError`, `tagOrigin`/`isHandlerOriginTag` helpers; both errors re-exported from package main
+- **T4** (`4b19f54`) — `StateDisposedEvent` type + `stateDisposed` map entry (catalog 24 → 25), `EventEmitter.emitCollect(event, payload, errorLog)` method
+- **T5** (`f6f57ed`) — `IntegrationRegistry<T>` class (flag-based detach, safe against detach-during-iteration); lifecycle types `LifecycleState`, `IntegrationTeardown<T>`, `IntegrationHandle` placed in `types.ts` (deviation from impl-spec §4.1.1 to satisfy §3 dependency direction — fleet/otel must be able to import lifecycle types without importing `lifecycle.ts`)
+- **T6** (`46a5823`) — `READ_ONLY_METHODS` audited (final size 20: 12 unchanged from cl-spec-015 §3.4, `getEvictionHistory → getEvictedSegments` reconciliation, 7 audit-added) + `guardDispose` helper. Impl-spec §4.1.3/§4.1.4/§5 amended.
+- **T7** (`cc3c463`) — `runTeardown(ctx)` orchestrator (six steps in fixed order with handler/integration error tagging via `tagOrigin` + origin-relative indices); `EventEmitter.removeAllListeners()` added as step-5 prerequisite
+- **T8** (`795d1d3`) — internal `clear()` audit; added `Tokenizer.clearCache`, `ContinuityTracker.clear`, `DiagnosticsManager.clear`, `SegmentStore.clear` (embedding/similarity already had `clearCache`)
+- **T9** (`de18631`) — `ContextLens` lifecycle plumbing: `instanceId` (public readonly, format `cl-N-xxxxxx`), `isDisposed`/`isDisposing` getters, `@internal attachIntegration`. Constructor renumbered (added Step 2 for `instanceId` generation). State machine wired but dormant — `lifecycleState` never leaves `'live'`.
+- **T10** (`43087da`) — `guardDispose` wired as the first statement of every existing public method (37 guards added; 38 total with T9's `attachIntegration`); live path unchanged
+- Test count: 977 (Phase 5 exit) → 1066 (+89 across T3–T10). All typechecks + builds clean throughout.
+
+Key implementation decisions captured during T1–T10:
+- **Lifecycle types in `types.ts` (T5).** Impl-spec §4.1.1 example colocated them with the class in `lifecycle.ts`, but §3 dependency direction says fleet/otel import lifecycle types from `types.ts` AND must not import `lifecycle.ts`. Putting types in `types.ts` is the only layout that satisfies both.
+- **Generic registry (T5).** `IntegrationTeardown<T = unknown>` and `IntegrationRegistry<T>` so `lifecycle.ts` doesn't import `ContextLens`. `index.ts` instantiates `new IntegrationRegistry<ContextLens>()`.
+- **Flag-based detach (T5).** `invokeAll` skips entries whose `detached` flag is set. Detach is O(1); registry is safe if a teardown callback unhooks a sibling integration's handle mid-iteration.
+- **`getEvictionHistory → getEvictedSegments` (T6).** Naming/return-type mismatch between cl-spec-007 §6.5 / cl-spec-015 §3.4 (says `getEvictionHistory: EvictionRecord[]`) and v0.1.0 code (`getEvictedSegments: Segment[]`). Treated as same logical method for read-only classification; full rename/return-type reconciliation is out of scope.
+- **Conservative read-only classification (T6).** `getPerformance` and `getDetection` return live internal-module references but are classified read-only — the call itself doesn't mutate, and the caller's hold on the reference survives step 4. Could be reclassified `@internal` later.
+- **`tagOrigin(error, origin, index)` signature (T3).** Resolves impl-spec §4.2 inconsistency between documented signature `tagOrigin(error, origin)` and `{ cause, origin, index }` return shape. Index is an explicit parameter; the orchestrator (T7) tracks index externally via `errorLog.length` deltas before/after each `emitCollect` and `invokeAll`.
+- **`instanceId` is `public readonly` (T9).** Impl-spec §4.4.1 example said `private readonly` but §4.7 calls it "the fourth always-valid public surface". §4.7 wins. Format: `cl-${++INSTANCE_COUNTER}-${Math.random().toString(36).slice(2, 8)}`.
 
 ### What's built
 
@@ -293,17 +315,13 @@ v0.2.0 design (this branch):
 | 3 — Detection & Advisory | **Complete** | detection (5 patterns, hysteresis, compounds, custom registration, fail-open, history), eviction (5-signal ranking, tiers, strategies, compaction), performance (timing, budgets, sampling) |
 | 4 — Public API & Diagnostics | **Complete** | ContextLens class (constructor, 8 segment ops, 4 group ops, task ops, assess, planEviction, provider mgmt, capacity), diagnostics (history, trends, timeline, warnings), formatters (3 pure functions) |
 | 5 — Enrichments | **Complete** | schemas (JSON Schema draft 2020-12, toJSON, validate), serialization (snapshot/fromSnapshot, format versioning, provider change detection), fleet (ContextLensFleet, assessFleet, aggregation, fleet events), OTel (ContextLensExporter, 9 gauges, 6 counters, 1 histogram, 5 log events) |
-| 6 — Instance Lifecycle (v0.2.0) | **Designed; impl pending** | New `lifecycle.ts` module (IntegrationRegistry, READ_ONLY_METHODS classification, guardDispose, runTeardown). Modifications to `errors` (DisposedError, DisposalError), `events` (stateDisposed event → 25 events total), `index` (dispose, isDisposed, isDisposing, instanceId, disposed-state guard at every public method), `fleet` (auto-unregister, instanceDisposed event), `otel` (auto-disconnect, instance.disposed log event) |
+| 6 — Instance Lifecycle (v0.2.0) | **In progress: T1–T10 of 17 tasks done** | Done: `lifecycle.ts` module (IntegrationRegistry, READ_ONLY_METHODS, guardDispose, runTeardown), `errors.ts` (DisposedError, DisposalError, tagOrigin/isHandlerOriginTag), `events.ts` (stateDisposed event → 25 events, emitCollect, removeAllListeners), `types.ts` (Lifecycle Domain), internal `clear()` shims (tokenizer, continuity, diagnostics, segment-store), `index.ts` (instanceId, isDisposed, isDisposing, attachIntegration, guardDispose wired into all 37 public methods). Pending: `dispose()` body (T11), fleet auto-unregister + instanceDisposed event (T12), otel auto-disconnect + instance.disposed log event (T13), integration tests (T14), property tests (T15), benchmarks (T16), exports + CHANGELOG (T17). |
 
 ### Test coverage
 
-| Layer | Files | Tests |
-|-------|------:|------:|
-| Unit | 23 | 758 |
-| Integration | 2 | 21 |
-| End-to-end | 1 | 7 |
-| Property-based | 5 | 60 |
-| Benchmarks | 1 | 12 |
+Phase 5 exit (v0.1.0 baseline): **977 tests** across 36 test files + 12 benchmarks.
+
+In progress on `feat/dispose-lifecycle` (after T10): **1066 tests** across 37 test files. Net additions in Phase 6 so far: new `test/unit/lifecycle.test.ts` (41 cases covering `IntegrationRegistry`, `READ_ONLY_METHODS`, `guardDispose`, `runTeardown`); +15 in `errors.test.ts` (DisposedError/DisposalError/helpers); +10 in `events.test.ts` (StateDisposedEvent wiring + `emitCollect` + `removeAllListeners`); +13 in `context-lens.test.ts` (lifecycle surface + guard sanity via cast); +10 across `tokenizer`, `continuity`, `diagnostics`, `segment-store` test files (`clear()` shims). Hard floor for the remaining tasks: 977 (no regression).
 
 ### Key architecture decisions made during implementation
 
@@ -322,11 +340,20 @@ v0.2.0 design (this branch):
 |-------|----------|-------|
 | Baseline not wired | Low | `BaselineManager.notifyAdd()` never called from `captureBaseline()`. Scores work correctly without it (raw scores used). Fix before v0.1.0. |
 | assess@500 over budget | Low | O(n^2) similarity at 500 segments takes ~300ms vs 50ms budget. Sampling mitigates in practice. |
-| No dispose method | Resolved in design | cl-spec-015 complete (post-grill, 15 invariants). Cross-cutting amendments to cl-spec-005/006/007/012/013/014 committed. `impl/I-06-lifecycle.md` ready for Phase 6 implementation. v0.2.0 target. |
+| No dispose method | In progress | Phase 6 active on `feat/dispose-lifecycle`. Lifecycle infrastructure landed (T1–T10); `dispose()` body lands in T11. State machine fully scaffolded but dormant — `lifecycleState` never leaves `'live'` until T11. v0.2.0 target. |
 
 ## What's next
 
-**v0.2.0 Phase 6 implementation.** Execute `impl/I-06-lifecycle.md` on the `feat/dispose-lifecycle` branch. The build plan covers: a new internal `lifecycle.ts` module, two new error types in `errors.ts`, the `stateDisposed` event in `events.ts`, lifecycle methods + guard wiring on `ContextLens`, fleet auto-unregister, and OTel auto-disconnect. Test matrix: 5 unit-test groups, 15 integration flows, 4 property-based properties, 3 microbenchmarks (including a < 100 ns target for the disposed-state guard).
+**Resume at T11 of Phase 6.** Open `IMPL_JOURNAL.md` for the canonical 17-task plan with status, per-task notes, and test-count deltas. T1–T10 are committed and tested (1066/1066 green); the lifecycle infrastructure is fully scaffolded but dormant. T11 lands `dispose()` itself — the body, the `clearResources` closure, `runTeardown` wiring, `DisposalError` rethrow on non-empty error log. After T11 the state machine activates.
+
+Remaining tasks (T11–T17):
+- **T11** — `dispose()` body in `index.ts` (idempotent, reentrant-safe, six-step teardown via `runTeardown`)
+- **T12** — `fleet.ts` integration: registration handshake via `attachIntegration`, `instanceDisposed` event, auto-unregister callback
+- **T13** — `otel.ts` integration: constructor handshake, `disconnect()` refactor, `context_lens.instance.disposed` log event, auto-disconnect callback
+- **T14** — `test/integration/lifecycle.test.ts` (15 flows from impl-spec §5)
+- **T15** — `test/property/lifecycle.test.ts` (4 fast-check properties)
+- **T16** — `test/bench/lifecycle.bench.ts` (3 microbenchmarks: `dispose-empty <0.5 ms`, `dispose-500 <10 ms`, `guardDispose <100 ns`)
+- **T17** — Public exports audit, `IMPLEMENTATION.md` Phase 6 row → done, `CHANGELOG.md` for v0.2.0, full regression sweep
 
 See `SHIPPING.md` for the full v0.2.0–v0.3.0 release plan.
 
@@ -385,22 +412,24 @@ Key technology decisions: TypeScript strict mode, tsup for ESM+CJS dual build, v
 
 ## Files to read on pickup
 
-Working on v0.2.0 Phase 6 (dispose lifecycle):
+Working on v0.2.0 Phase 6 (dispose lifecycle), resuming mid-phase:
 
-1. `impl/I-06-lifecycle.md` — Phase 6 build plan (start here)
-2. `specs/15-instance-lifecycle.md` — design spec; the source of truth for behavior
-3. `specs/07-api-surface.md` §9 (Lifecycle), §10.2 (stateDisposed event), §10.3 (handler-contract deviation), §11.1 (DisposedError, DisposalError)
-4. `specs/12-fleet-monitor.md` §7 (Instance Disposal Handling)
-5. `specs/13-observability-export.md` §2.1 (Lifecycle, two subsections)
-6. `specs/14-serialization.md` §3.4 (Snapshot-then-dispose continuation)
-7. Branch `feat/dispose-lifecycle`, nine commits ahead of `main`. Untracked: `specs/draft.md` (grill notes, kept across the design phase; can be discarded or archived after Phase 6 impl)
+1. `IMPL_JOURNAL.md` — **canonical Phase 6 task tracker** with status, per-task notes (decisions, deviations, test deltas), and rollover commit refs. T1–T10 done, T11 next. Read this first.
+2. `impl/I-06-lifecycle.md` — Phase 6 build plan (570 lines, amended in T2 + T6 to specify `emitCollect` and the audited 20-name `READ_ONLY_METHODS` set)
+3. `specs/15-instance-lifecycle.md` — design spec; the source of truth for behavior
+4. `specs/07-api-surface.md` §9 (Lifecycle), §10.2 (stateDisposed event), §10.3 (handler-contract deviation), §11.1 (DisposedError, DisposalError)
+5. `specs/12-fleet-monitor.md` §7 (Instance Disposal Handling) — informs T12
+6. `specs/13-observability-export.md` §2.1 (Lifecycle, two subsections) — informs T13
+7. `specs/14-serialization.md` §3.4 (Snapshot-then-dispose continuation) — informs the snapshot-then-dispose-then-restore flow in T14 integration tests
+8. Branch `feat/dispose-lifecycle`, **19 commits ahead of `main`** (10 commits from the T1–T10 session, plus the prior 9 planning + design commits). Working tree clean. Untracked: `specs/draft.md` (grill notes, kept across the design phase; can be discarded or archived after Phase 6 impl)
 
-Reference (existing v0.1.0 baseline):
+Reference (existing v0.1.0 baseline + Phase 6 in-progress modules):
 
-8. `IMPLEMENTATION.md` — strategy document with Phase 6 row added in §5
-9. `SHIPPING.md` — release plan
-10. `impl/I-02-scoring-engine.md` through `impl/I-05-enrichments.md` — prior-phase impl specs
-11. `specs/01-segment-model.md` through `specs/14-serialization.md` — design specs (authoritative behavioral reference)
+9. `IMPLEMENTATION.md` — strategy document with Phase 6 row added in §5
+10. `SHIPPING.md` — release plan
+11. `impl/I-02-scoring-engine.md` through `impl/I-05-enrichments.md` — prior-phase impl specs
+12. `specs/01-segment-model.md` through `specs/14-serialization.md` — design specs (authoritative behavioral reference)
+13. `src/lifecycle.ts` — internal infrastructure landed in T5–T7 (IntegrationRegistry, READ_ONLY_METHODS, guardDispose, runTeardown). T11's `dispose()` body in `index.ts` will call `runTeardown` from here, supplying a `TeardownContext` with the `clearResources` closure that invokes the six `clear()`/`clearCache()` methods landed in T8.
 
 **Archived:** `REVIEW.md` and `REVIEW_FINDINGS.md` exported to `../archive/context-lens-REVIEW.md` and `../archive/context-lens-REVIEW_FINDINGS.md`
 **Removed:** `IMPL_JOURNAL.md` (build tracker, superseded — all 33 tasks done) and `TEST_STRATEGY.md` (testing uplift plan, superseded — all 5 phases complete)
