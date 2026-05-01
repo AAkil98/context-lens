@@ -174,8 +174,10 @@ These operations modify the segment collection and update derived state. They ar
 | Scenario | Budget at n ≤ 500 | Condition |
 |----------|-------------------|-----------|
 | **No changes since last report** | < 1 ms | Cached report returned (Tier 1) |
-| **k segments changed, k << n** | < 50 ms | Incremental recomputation of invalidated scores |
-| **Cold start (no cached scores)** | < 500 ms | Full computation with sampling for n > 200 |
+| **k segments changed, k << n, similarity cache warm** | < 50 ms | Incremental recomputation of invalidated scores; unchanged pairs hit the cache (cl-spec-016) |
+| **Cold start (no cached scores) at n ≤ 200** | < 50 ms | Full computation, no sampling |
+| **Cold start at n > 200** | < 200 ms | Full computation with sampling per cl-spec-016 §3 |
+| **Cache disabled (similarityCacheSize = 0)** | < 500 ms | Full re-computation per assess; cl-spec-016 §6 documents the latency tradeoff |
 
 **Incremental assessment** is the common case. Between two `assess()` calls, the caller typically adds 1–5 segments, evicts a few, or updates a task. The incremental path recomputes scores only for invalidated segments and re-aggregates window-level scores from the mix of cached and fresh per-segment scores.
 
@@ -762,6 +764,7 @@ These invariants are guarantees that the implementation must uphold. They formal
 | `cl-spec-007` (API Surface) | Defines all public operations whose performance is budgeted here; constructor configuration including cache sizes |
 | `cl-spec-008` (Eviction Advisory) | Defines eviction scoring, bridge scores, and planning algorithm budgeted here |
 | `cl-spec-010` (Report & Diagnostics) | Consumes timing records and cache metrics defined in section 8 |
+| `cl-spec-016` (Similarity Caching & Sampling) | Defines the incremental similarity cache contract, adaptive sampling at n > 300, and the cache-warm/cache-cold determinism invariant. Refines the Tier 3 budget rows in section 3.3 of this spec; coordinates with the Sampling subsection (section 5) and the Memory Budget (section 6.2). |
 
 ---
 
