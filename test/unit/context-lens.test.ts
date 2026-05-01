@@ -1461,3 +1461,234 @@ describe('dispose() — real flow', () => {
     expect(lens.isDisposed).toBe(true);
   });
 });
+
+// ─── Memory Management (cl-spec-007 §8.9, Gap 6) ──────────────────
+
+describe('Memory management', () => {
+  function makeWarmedLens(): ContextLens {
+    const lens = new ContextLens({ capacity: 100000 });
+    // Warm all three caches: token cache via add, similarity cache via assess,
+    // embedding cache via assess (trigram mode by default — still populated).
+    lens.add('first segment full of unique words for tokenization aaa');
+    lens.add('second segment full of different unique words bbb');
+    lens.add('third segment full of yet more distinctive words ccc');
+    lens.assess();
+    return lens;
+  }
+
+  it('clearCaches() with no argument clears all three caches and emits cachesCleared("all")', () => {
+    const lens = makeWarmedLens();
+
+    const events: { kind: string; entriesCleared: { tokenizer: number; embedding: number; similarity: number } }[] = [];
+    lens.on('cachesCleared', (p) => events.push(p));
+
+    const before = lens.getMemoryUsage();
+    expect(before.tokenizer.entries).toBeGreaterThan(0);
+    expect(before.embedding.entries).toBeGreaterThan(0);
+    expect(before.similarity.entries).toBeGreaterThan(0);
+
+    lens.clearCaches();
+
+    const after = lens.getMemoryUsage();
+    expect(after.tokenizer.entries).toBe(0);
+    expect(after.embedding.entries).toBe(0);
+    expect(after.similarity.entries).toBe(0);
+    expect(after.totalEstimatedBytes).toBe(0);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]!.kind).toBe('all');
+    expect(events[0]!.entriesCleared.tokenizer).toBe(before.tokenizer.entries);
+    expect(events[0]!.entriesCleared.embedding).toBe(before.embedding.entries);
+    expect(events[0]!.entriesCleared.similarity).toBe(before.similarity.entries);
+  });
+
+  it('clearCaches("tokenizer") empties only the token cache; others unchanged', () => {
+    const lens = makeWarmedLens();
+    const before = lens.getMemoryUsage();
+
+    lens.clearCaches('tokenizer');
+
+    const after = lens.getMemoryUsage();
+    expect(after.tokenizer.entries).toBe(0);
+    expect(after.embedding.entries).toBe(before.embedding.entries);
+    expect(after.similarity.entries).toBe(before.similarity.entries);
+  });
+
+  it('clearCaches("embedding") empties only the embedding cache', () => {
+    const lens = makeWarmedLens();
+    const before = lens.getMemoryUsage();
+
+    lens.clearCaches('embedding');
+
+    const after = lens.getMemoryUsage();
+    expect(after.tokenizer.entries).toBe(before.tokenizer.entries);
+    expect(after.embedding.entries).toBe(0);
+    expect(after.similarity.entries).toBe(before.similarity.entries);
+  });
+
+  it('clearCaches("similarity") empties only the similarity cache', () => {
+    const lens = makeWarmedLens();
+    const before = lens.getMemoryUsage();
+
+    lens.clearCaches('similarity');
+
+    const after = lens.getMemoryUsage();
+    expect(after.tokenizer.entries).toBe(before.tokenizer.entries);
+    expect(after.embedding.entries).toBe(before.embedding.entries);
+    expect(after.similarity.entries).toBe(0);
+  });
+
+  it('clearCaches("invalid") throws ValidationError; instance state unchanged', () => {
+    const lens = makeWarmedLens();
+    const before = lens.getMemoryUsage();
+
+    expect(() => lens.clearCaches('invalid' as 'all')).toThrow(ValidationError);
+
+    const after = lens.getMemoryUsage();
+    expect(after.tokenizer.entries).toBe(before.tokenizer.entries);
+    expect(after.embedding.entries).toBe(before.embedding.entries);
+    expect(after.similarity.entries).toBe(before.similarity.entries);
+  });
+
+  it('setCacheSize shrinks the named cache; does NOT emit cachesCleared', () => {
+    const lens = makeWarmedLens();
+    const events: unknown[] = [];
+    lens.on('cachesCleared', (p) => events.push(p));
+
+    lens.setCacheSize('embedding', 1);
+
+    const usage = lens.getMemoryUsage();
+    expect(usage.embedding.maxEntries).toBe(1);
+    expect(usage.embedding.entries).toBeLessThanOrEqual(1);
+    expect(events).toHaveLength(0);
+  });
+
+  it('setCacheSize(kind, 0) disables the named cache', () => {
+    const lens = makeWarmedLens();
+
+    lens.setCacheSize('similarity', 0);
+    const usage = lens.getMemoryUsage();
+    expect(usage.similarity.entries).toBe(0);
+    expect(usage.similarity.maxEntries).toBe(0);
+
+    // Re-running assess populates segments but the disabled cache stays empty.
+    lens.add('an additional segment to force a new assess cycle');
+    lens.assess();
+    expect(lens.getMemoryUsage().similarity.entries).toBe(0);
+  });
+
+  it('setCacheSize("all", N) throws ValidationError', () => {
+    const lens = new ContextLens({ capacity: 1000 });
+    expect(() => lens.setCacheSize('all' as 'embedding', 1000)).toThrow(ValidationError);
+  });
+
+  it('setCacheSize rejects negative size', () => {
+    const lens = new ContextLens({ capacity: 1000 });
+    expect(() => lens.setCacheSize('embedding', -1)).toThrow(ValidationError);
+  });
+
+  it('setCacheSize rejects non-integer size', () => {
+    const lens = new ContextLens({ capacity: 1000 });
+    expect(() => lens.setCacheSize('embedding', 1.5)).toThrow(ValidationError);
+  });
+
+  it('setCacheSize rejects unknown kind', () => {
+    const lens = new ContextLens({ capacity: 1000 });
+    expect(() => lens.setCacheSize('bogus' as 'embedding', 100)).toThrow(ValidationError);
+  });
+
+  it('getMemoryUsage returns the documented shape with totalEstimatedBytes matching the per-cache sum', () => {
+    const lens = makeWarmedLens();
+    const usage = lens.getMemoryUsage();
+
+    expect(usage).toMatchObject({
+      tokenizer: expect.objectContaining({
+        entries: expect.any(Number),
+        maxEntries: expect.any(Number),
+        estimatedBytes: expect.any(Number),
+      }),
+      embedding: expect.objectContaining({
+        entries: expect.any(Number),
+        maxEntries: expect.any(Number),
+        estimatedBytes: expect.any(Number),
+      }),
+      similarity: expect.objectContaining({
+        entries: expect.any(Number),
+        maxEntries: expect.any(Number),
+        estimatedBytes: expect.any(Number),
+      }),
+      totalEstimatedBytes: expect.any(Number),
+    });
+    expect(usage.totalEstimatedBytes).toBe(
+      usage.tokenizer.estimatedBytes + usage.embedding.estimatedBytes + usage.similarity.estimatedBytes,
+    );
+  });
+
+  it('getMemoryUsage uses 80 bytes/entry for similarity and 100 bytes/entry for tokenizer', () => {
+    const lens = makeWarmedLens();
+    const usage = lens.getMemoryUsage();
+
+    expect(usage.tokenizer.estimatedBytes).toBe(usage.tokenizer.entries * 100);
+    expect(usage.similarity.estimatedBytes).toBe(usage.similarity.entries * 80);
+  });
+
+  it('getMemoryUsage uses 8000 bytes/entry for embedding cache in trigram mode', () => {
+    const lens = makeWarmedLens();
+    const usage = lens.getMemoryUsage();
+    // Default zero-config lens runs in trigram mode.
+    expect(usage.embedding.estimatedBytes).toBe(usage.embedding.entries * 8000);
+  });
+
+  it('getMemoryUsage after clearCaches reports zero entries', () => {
+    const lens = makeWarmedLens();
+    lens.clearCaches();
+    const usage = lens.getMemoryUsage();
+    expect(usage.tokenizer.entries).toBe(0);
+    expect(usage.embedding.entries).toBe(0);
+    expect(usage.similarity.entries).toBe(0);
+    expect(usage.totalEstimatedBytes).toBe(0);
+  });
+
+  it('clearCaches() throws DisposedError after dispose()', () => {
+    const lens = new ContextLens({ capacity: 1000 });
+    lens.dispose();
+    expect(() => lens.clearCaches()).toThrow(DisposedError);
+  });
+
+  it('setCacheSize throws DisposedError after dispose()', () => {
+    const lens = new ContextLens({ capacity: 1000 });
+    lens.dispose();
+    expect(() => lens.setCacheSize('embedding', 100)).toThrow(DisposedError);
+  });
+
+  it('getMemoryUsage throws DisposedError after dispose()', () => {
+    const lens = new ContextLens({ capacity: 1000 });
+    lens.dispose();
+    expect(() => lens.getMemoryUsage()).toThrow(DisposedError);
+  });
+
+  it('clearCaches preserves segments and assessment continues', () => {
+    const lens = makeWarmedLens();
+    const segCountBefore = lens.getSegmentCount();
+    lens.clearCaches();
+
+    expect(lens.getSegmentCount()).toBe(segCountBefore);
+
+    // Segments still have their stored tokenCount (count stability invariant).
+    const segs = lens.listSegments();
+    for (const seg of segs) {
+      expect(seg.tokenCount).toBeGreaterThan(0);
+    }
+
+    // The next assess() that follows a mutation produces a fresh report and
+    // repopulates the underlying caches. (assess() without an intervening
+    // mutation returns the cached report — see cl-spec-002 §9.6 quality-
+    // report caching; clearCaches does not invalidate that higher-level
+    // cache because it is the assembled output, not a derived primitive.)
+    lens.add('a fresh segment to invalidate the quality report cache');
+    const report = lens.assess();
+    expect(report).toBeDefined();
+    const usageAfterAssess = lens.getMemoryUsage();
+    expect(usageAfterAssess.similarity.entries).toBeGreaterThan(0);
+  });
+});

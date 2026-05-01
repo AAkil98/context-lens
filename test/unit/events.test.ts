@@ -314,3 +314,45 @@ describe('stateDisposed event wiring', () => {
     }).toThrow(TypeError);
   });
 });
+
+// ─── ContextLensEventMap / cachesCleared (cl-spec-007 §8.9.1, Gap 6) ──
+
+describe('cachesCleared event wiring', () => {
+  it('event map accepts the documented cachesCleared payload shape', () => {
+    const emitter = new EventEmitter<ContextLensEventMap>();
+    let received: ContextLensEventMap['cachesCleared'] | null = null;
+    emitter.on('cachesCleared', (p) => { received = p; });
+
+    const payload = {
+      kind: 'all' as const,
+      entriesCleared: { tokenizer: 12, embedding: 34, similarity: 56 },
+    };
+    emitter.emit('cachesCleared', payload);
+
+    expect(received).toEqual(payload);
+  });
+
+  it('per-cache kinds also flow through the event map', () => {
+    const emitter = new EventEmitter<ContextLensEventMap>();
+    const received: ContextLensEventMap['cachesCleared'][] = [];
+    emitter.on('cachesCleared', (p) => { received.push(p); });
+
+    emitter.emit('cachesCleared', {
+      kind: 'tokenizer',
+      entriesCleared: { tokenizer: 7, embedding: 0, similarity: 0 },
+    });
+    emitter.emit('cachesCleared', {
+      kind: 'embedding',
+      entriesCleared: { tokenizer: 0, embedding: 8, similarity: 0 },
+    });
+    emitter.emit('cachesCleared', {
+      kind: 'similarity',
+      entriesCleared: { tokenizer: 0, embedding: 0, similarity: 9 },
+    });
+
+    expect(received).toHaveLength(3);
+    expect(received[0]!.kind).toBe('tokenizer');
+    expect(received[1]!.kind).toBe('embedding');
+    expect(received[2]!.kind).toBe('similarity');
+  });
+});

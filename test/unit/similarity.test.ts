@@ -245,4 +245,39 @@ describe('SimilarityEngine', () => {
     // Cache size is 2, so the oldest entry was evicted
     expect(engine.cacheEntryCount).toBe(2);
   });
+
+  // ── Memory management hooks (cl-spec-007 §8.9) ─────────────
+
+  describe('Memory management hooks', () => {
+    it('getEntryCount + getMaxEntries reflect cache state', () => {
+      const engine = new SimilarityEngine(10);
+      expect(engine.getEntryCount()).toBe(0);
+      expect(engine.getMaxEntries()).toBe(10);
+
+      engine.computeSimilarity(1, 'aaa', 2, 'bbb');
+      engine.computeSimilarity(3, 'ccc', 4, 'ddd');
+      expect(engine.getEntryCount()).toBe(2);
+    });
+
+    it('setCacheSize shrinks and returns evicted count', () => {
+      const engine = new SimilarityEngine(10);
+      for (let i = 1; i <= 5; i++) {
+        engine.computeSimilarity(i, `c${i}a`, i + 100, `c${i}b`);
+      }
+      expect(engine.getEntryCount()).toBe(5);
+
+      const evicted = engine.setCacheSize(2);
+      expect(evicted).toBe(3);
+      expect(engine.getEntryCount()).toBe(2);
+      expect(engine.getMaxEntries()).toBe(2);
+    });
+
+    it('setCacheSize(0) drops all entries', () => {
+      const engine = new SimilarityEngine(10);
+      engine.computeSimilarity(1, 'aaa', 2, 'bbb');
+      engine.setCacheSize(0);
+      expect(engine.getEntryCount()).toBe(0);
+      expect(engine.getMaxEntries()).toBe(0);
+    });
+  });
 });

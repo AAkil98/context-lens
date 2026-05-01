@@ -512,4 +512,63 @@ describe('EmbeddingEngine', () => {
       expect(engine.getVector(1)).toBeUndefined();
     });
   });
+
+  // ── Memory management hooks (cl-spec-007 §8.9, cl-spec-005 §5.5) ─
+
+  describe('Memory management hooks', () => {
+    it('getEntryCount + getMaxEntries reflect cache state', async () => {
+      const e = new EmbeddingEngine(50, countTokens);
+      expect(e.getEntryCount()).toBe(0);
+      expect(e.getMaxEntries()).toBe(50);
+
+      await e.prepare(1, 'alpha');
+      await e.prepare(2, 'beta');
+      expect(e.getEntryCount()).toBe(2);
+    });
+
+    it('setCacheSize shrinks and returns evicted count', async () => {
+      const e = new EmbeddingEngine(10, countTokens);
+      for (let i = 1; i <= 10; i++) {
+        await e.prepare(i, `content-${i}`);
+      }
+      expect(e.getEntryCount()).toBe(10);
+
+      const evicted = e.setCacheSize(3);
+      expect(evicted).toBe(7);
+      expect(e.getEntryCount()).toBe(3);
+      expect(e.getMaxEntries()).toBe(3);
+    });
+
+    it('setCacheSize(0) drops all entries', async () => {
+      const e = new EmbeddingEngine(10, countTokens);
+      await e.prepare(1, 'one');
+      await e.prepare(2, 'two');
+
+      e.setCacheSize(0);
+      expect(e.getEntryCount()).toBe(0);
+      expect(e.getMaxEntries()).toBe(0);
+    });
+
+    it('getEntryByteEstimate returns 0 on empty cache', () => {
+      const e = new EmbeddingEngine(50, countTokens);
+      expect(e.getEntryByteEstimate()).toBe(0);
+    });
+
+    it('getEntryByteEstimate returns dimensions × 8 + 100 in embedding mode', async () => {
+      const e = new EmbeddingEngine(50, countTokens);
+      const { provider, metadata } = makeProvider(384);
+      await e.setProvider(provider, metadata, [], () => {});
+      // Empty cache still — estimate is still 0
+      expect(e.getEntryByteEstimate()).toBe(0);
+      await e.prepare(1, 'content');
+      expect(e.getEntryByteEstimate()).toBe(384 * 8 + 100);
+    });
+
+    it('getEntryByteEstimate returns 8000 in trigram mode (no provider)', async () => {
+      const e = new EmbeddingEngine(50, countTokens);
+      await e.prepare(1, 'hello world');
+      // Trigram mode (no provider configured)
+      expect(e.getEntryByteEstimate()).toBe(8000);
+    });
+  });
 });

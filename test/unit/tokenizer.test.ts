@@ -594,4 +594,39 @@ describe('Tokenizer.getInfo()', () => {
       expect(tok.count('post-clear')).toBeGreaterThan(0);
     });
   });
+
+  // ── Memory management hooks (cl-spec-007 §8.9, cl-spec-006 §5.6) ─
+
+  describe('Memory management hooks', () => {
+    it('getEntryCount + getMaxEntries reflect current cache state', () => {
+      const tok = new Tokenizer('approximate', undefined, 100);
+      expect(tok.getEntryCount()).toBe(0);
+      expect(tok.getMaxEntries()).toBe(100);
+      tok.count('one');
+      tok.count('two');
+      expect(tok.getEntryCount()).toBe(2);
+    });
+
+    it('setCacheSize shrinks and returns evicted count', () => {
+      const tok = new Tokenizer('approximate', undefined, 10);
+      for (let i = 0; i < 10; i++) tok.count(`fragment-${i}`);
+      expect(tok.getEntryCount()).toBe(10);
+
+      const evicted = tok.setCacheSize(3);
+      expect(evicted).toBe(7);
+      expect(tok.getEntryCount()).toBe(3);
+      expect(tok.getMaxEntries()).toBe(3);
+    });
+
+    it('setCacheSize(0) disables the cache; count() still returns correct results', () => {
+      const tok = new Tokenizer('approximate', undefined, 100);
+      tok.count('warmup');
+      tok.setCacheSize(0);
+      expect(tok.getEntryCount()).toBe(0);
+      expect(tok.getMaxEntries()).toBe(0);
+
+      expect(tok.count('post-disable')).toBeGreaterThan(0);
+      expect(tok.getEntryCount()).toBe(0);
+    });
+  });
 });
