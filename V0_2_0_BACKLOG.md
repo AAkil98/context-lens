@@ -16,7 +16,7 @@
 | 2 | Instance disposal (`dispose()`) | **done** | `cl-spec-015` + Phase 6 (T1–T17) |
 | 3 | Fleet serialization | **done** | `cl-spec-012` §8 (new) + Invariants 10–12 + cl-spec-014 §5 amendment + impl spec `I-09-fleet-serialization.md` + `snapshot()` / `fromSnapshot()` in `src/fleet.ts` |
 | 4 | OTel re-attach | **done** | `cl-spec-013` §2.1.3 (new) + Invariants 10/11 + impl spec `I-07-otel-reattach.md` + `attach()` in `src/otel.ts` |
-| 5 | `assess@500` over budget | open | likely new `cl-spec-016` (option-b decision required) |
+| 5 | `assess@500` over budget | **done** | new `cl-spec-016` Similarity Caching & Sampling + `cl-spec-002`/`009` amendments + impl spec `I-10-similarity-caching.md` + adaptive `densitySampleCap` + `similarityCacheSize` config |
 | 6 | Memory release | **done** | `cl-spec-007` §8.9 (new) + `cachesCleared` event + impl spec `I-08-memory-release.md` + LruCache.resize + `clearCaches`/`setCacheSize`/`getMemoryUsage` |
 | 7 | Provider resilience | **deferred** | recommended to v0.3.0 in V0_2_0_DESIGN_STRATEGY.md |
 | 8 | Runtime compatibility statement | open | one-paragraph addition to `cl-spec-009` |
@@ -29,7 +29,7 @@ Dependency order from V0_2_0_DESIGN_STRATEGY.md, refreshed for post-Phase-6 stat
 2. ~~**Gap 4 — OTel re-attach**~~ — **done 2026-05-01.** `cl-spec-013` §2.1.3 (new subsection) + Invariants 10 (state scope) and 11 (single-instance binding); `impl/I-07-otel-reattach.md`; `ContextLensExporter.attach()` + gauge management refactor in `src/otel.ts`; 9 unit tests + 2 integration tests. 1116 → 1127 tests / 39 → 40 files / typecheck clean.
 3. ~~**Gap 6 — Memory release**~~ — **done 2026-05-01.** `cl-spec-007` §8.9 (new section: clearCaches/setCacheSize/getMemoryUsage) + `cachesCleared` event (catalog 25 → 26) + cross-refs in `cl-spec-005` §5.5, `cl-spec-006` §5.6, `cl-spec-009` §6.5; `impl/I-08-memory-release.md`; `LruCache.resize` + per-cache setCacheSize/getEntryCount/getMaxEntries hooks (embedding adds getEntryByteEstimate); 39 new tests (38 unit + 1 integration). 1128 → 1167 tests / 40 files / typecheck clean.
 4. ~~**Gap 3 — Fleet serialization**~~ — **done 2026-05-02.** `cl-spec-012` §8 (new section: 8.1 Snapshot, 8.2 Restore, 8.3 Format Versioning) + Invariants 10–12; `cl-spec-014` §5 amendment acknowledging fleet wrapping; `impl/I-09-fleet-serialization.md`; `ContextLensFleet.snapshot()` + `static fromSnapshot()` in `src/fleet.ts`; 13 unit + 3 integration tests. 1167 → 1184 tests / 40 → 41 files / typecheck clean.
-5. **Gap 5 — `assess@500`** (decision lock first: option a / b / c; if b is chosen, new `cl-spec-016` similarity caching spec needed and interacts with Gap 6's new cache kind)
+5. ~~**Gap 5 — `assess@500`**~~ — **done 2026-05-02.** New `cl-spec-016` Similarity Caching & Sampling spec; `cl-spec-002` §3.4 + `cl-spec-009` §3.3 amendments; `impl/I-10-similarity-caching.md`; adaptive `densitySampleCap(n)` step function + new `similarityCacheSize` constructor option with capacity-scaling default formula; 15 new tests (4 density + 8 config + 3 property). 1184 → 1199 tests / 41 → 42 files / typecheck clean. **Bench delta: assess@500 ~341 ms → ~9.2 ms (~37× speedup).** Cache-warm/cache-cold determinism (Invariant 1) verified by property test over 50+ runs.
 6. **Gap 8 — Runtime compatibility statement** (one paragraph; can land any time, ordered last because it depends on the v0.2.0 surface being settled)
 
 Gap 7 (provider resilience) is **deferred** unless the user revives it.
@@ -114,30 +114,31 @@ Each block below: scope, design surface, impl surface, test surface, commit esti
 
 > `ContextLensExporter.detach(instance)` already lands in Phase 6's auto-disconnect path. New: explicit `attach(instance)` to bind the exporter to a fresh instance after `fromSnapshot`. State scope on re-attach: counters kept (monotonic), histograms kept (distributional), gauges reset to new instance's first assess values.
 
-### Gap 5 — `assess@500` budget
+### Gap 5 — `assess@500` budget — DONE (2026-05-02)
 
-**Scope:** Currently ~300ms vs 50ms target at n=500 (the `assess@500 over budget` known issue from Phase 5). Three candidate paths from V0_2_0_DESIGN_STRATEGY.md; option (b) recommended.
+**Shipped on `feat/v0.2-hardening`** in 4 commits: spec, impl spec, code, tests.
 
-**Decision lock required:** option (a) tighter stratified sampling, (b) incremental pairwise similarity cache, or (c) LSH/ANN. Recommended (b) with (a) as fallback above N. Locks the spec scope and cost.
+**What landed:**
+- `cl-spec-016 Similarity Caching & Sampling` — new design spec (10 invariants, 8 sections). Defines the incremental similarity cache contract, adaptive sampling at n > 300, and the load-bearing cache-warm/cache-cold determinism invariant. Coordinates amendments to cl-spec-002 (§3.4 sampling note) and cl-spec-009 (§3.3 budget rows expanded from 3 to 5).
+- `impl/I-10-similarity-caching.md` — full build plan in the I-06/I-07/I-08/I-09 format.
+- `src/scoring/density.ts` — fixed `UNCACHED_SAMPLE_CAP = 30` replaced with `densitySampleCap(n)` step function (30 ≤ 300 → 15 ≤ 500 → 10). Local sampleCap variable per assess; same prefix-of-shuffle semantics preserve cache-warm/cache-cold determinism.
+- `src/index.ts` — new `ContextLensConfig.similarityCacheSize` field (optional, non-negative integer; 0 permitted to disable cache). Default via `defaultSimilarityCacheSize(capacity)`: clamp(sqrt(capacity/200) × 16384, 16384, 65536). At typical 128k capacity, default is 65,536 entries (was 16,384 — fits the full pairwise working set at n=500 without LRU thrash). Validation, snapshot capture (via `this.similarity.getMaxEntries()` as single source of truth), and fromSnapshot fallback for older snapshots.
+- `src/types.ts` — `SerializedConfig.similarityCacheSize?: number` field (optional, forward-compat).
+- 15 new tests: 4 density step function + 8 similarityCacheSize config (defaults, override, 0-disabled, validation, snapshot/restore round-trip with forward-compat) + 3 property-based determinism (cache-warm vs cache-cold output equality at 30 runs, cache-disabled vs default at 20 runs, three-size comparison).
 
-**Design work** (depends on chosen option):
-- If (a): amend `cl-spec-002` §5 sampling subsection only — minimal, ~1 commit
-- If (b): amend `cl-spec-002` §5 with new "Incremental Similarity" subsection + amend `cl-spec-009` budget rows + **new `cl-spec-016 Similarity Caching & Sampling`** coordinating spec spanning cl-spec-002/005/009
-- If (c): new spec, ~2× the surface area of (b)
+**Bench delta (the headline number):**
+- `assess @ 500` v0.1.0 baseline: ~341 ms (the original known issue)
+- `assess @ 500` v0.2.0 Gap 5: ~9.2 ms — **~37× speedup**, well under the 50 ms tier-3 budget
+- Both adaptive sampling (halves density's per-assess work at n=500) and the larger default cache (65,536 vs 16,384) contribute. The cache size matters more — at n=500 the pairwise working set is ~10K pairs, which the old default barely fit and the new default fits with room to spare.
 
-**Impl work** (option b — the most likely path):
-- `similarity.ts` — pairwise cache keyed on `(idA, idB, providerName)`, LRU-bounded, default sized for n≤200
-- `index.ts` — invalidation hooks on segment update/replace/evict and on provider change
-- Cache size config exposed via constructor + `setCacheSize` (interaction with Gap 6)
+**Decision locks applied (per user thumbs-up 2026-05-01):**
+- Option (b) primary: incremental pairwise similarity cache with the existing invalidation hooks (cl-spec-002 §3.2 unchanged; the cache simply got a much larger default).
+- Option (a) fallback: tighter density sample cap above n > 300.
+- Cache-warm/cache-cold determinism (Invariant 1) is the load-bearing contract. Property test over 50+ runs verifies.
 
-**Test work:**
-- Property test: `assess()` output identical across cache-warm and cache-cold states (determinism preservation)
-- Bench: `assess@500` cache-warm should drop to <50ms (matches target); cache-cold remains comparable to current
-- Unit tests for cache invalidation contract
+**Original scope** (kept here for historical reference):
 
-**Commits:** 1–2 design, 1 impl-spec, ~5–7 build tasks (option b).
-**Dependencies:** Gap 2 (done — informs cache-clear symmetry); Gap 6 (the new cache kind needs `clearCaches` / `setCacheSize` / `getMemoryUsage` coverage).
-**Decisions:** option a/b/c lock, cache size default, invalidation granularity.
+> Currently ~300ms vs 50ms target at n=500. Three candidate paths from V0_2_0_DESIGN_STRATEGY.md; option (b) recommended (incremental pairwise similarity cache).
 
 ### Gap 6 — Memory release — DONE (2026-05-01)
 
@@ -201,19 +202,19 @@ Per V0_2_0_DESIGN_STRATEGY.md "Non-goals":
 
 ## Total scope estimate
 
-Remaining after Gaps 1, 3, 4, and 6 shipped (2026-05-01 / 02):
+Remaining after Gaps 1, 3, 4, 5, and 6 shipped (2026-05-01 / 02):
 
 | Surface | Count |
 |---------|------:|
-| Design specs (new) | 0–1 (cl-spec-016 if Gap 5 option b) |
-| Design specs (amended) | 2 remaining (cl-spec-009 for Gap 8; cl-spec-002/009 for Gap 5) |
-| Impl specs (new) | 1 remaining (Gap 5 — Gap 8 is spec-only) |
-| Build tasks | ~5–8 across the remaining impl spec |
-| New unit + integration tests | ~10–20 cases |
-| New benchmarks | 1–2 (for Gap 5 cache-warm vs. cache-cold) |
-| Net remaining commits on `feat/v0.2-hardening` | ~10–15 |
+| Design specs (new) | 0 (cl-spec-016 shipped with Gap 5) |
+| Design specs (amended) | 1 remaining (cl-spec-009 for Gap 8) |
+| Impl specs (new) | 0 remaining (Gap 8 is spec-only) |
+| Build tasks | 0 |
+| New unit + integration tests | 0 |
+| New benchmarks | 0 |
+| Net remaining commits on `feat/v0.2-hardening` | 1–2 (Gap 8 spec amendment + tracking sync) |
 
-Done so far on `feat/v0.2-hardening`: ~16 commits (Gap 1: 1, Gap 4: 5, Gap 6: 4, Gap 3: 4 + tracking syncs). Tests grew from 1116 (Phase 6 exit) to 1184 (current).
+Done so far on `feat/v0.2-hardening`: ~21 commits (Gap 1: 1, Gap 4: 5, Gap 6: 4, Gap 3: 4, Gap 5: 4 + tracking syncs). Tests grew from 1116 (Phase 6 exit) to 1199 (current).
 
 **Risk-weighted "ship dispose alone as v0.2.0, defer the rest to v0.2.1+v0.3.0" alternative:** still on the table per `SHIPPING.md` revision. The user picked option (2) — bundle — so this plan continues forward.
 
@@ -221,9 +222,9 @@ Done so far on `feat/v0.2-hardening`: ~16 commits (Gap 1: 1, Gap 4: 5, Gap 6: 4,
 
 ## Recommended next action
 
-**Gap 5 — `assess@500` over budget.** Decision lock already applied (option (b) incremental similarity cache, with (a) tighter sampling as fallback above N). New `cl-spec-016 Similarity Caching & Sampling` coordinating spec spans cl-spec-002/005/009; amendments to those three specs to reflect the new caching contract; impl spec; ~5–7 build tasks adding pairwise-cache invalidation hooks and a `similarityCacheSize` constructor option. Property test required: `assess()` output identical across cache-warm and cache-cold states.
+**Gap 8 — Runtime compatibility statement.** Single-paragraph addition to `cl-spec-009` declaring that the core library is compatible with browser, Deno, Bun, and edge runtimes provided `TextEncoder` is available; OTel exporter remains Node-only. No code changes; a CI matrix verification is a deferred follow-up. ~1 commit.
 
-Remaining sequence: Gap 5 → Gap 8.
+After Gap 8 lands: v0.2.0 hardening backlog is complete. Time to think about cutting v0.2.0 — merge `feat/v0.2-hardening` into `dev`, then `dev` into `main`, version bump to 0.2.0, npm publish, CHANGELOG sign-off.
 
 ---
 

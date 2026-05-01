@@ -271,7 +271,7 @@ Grill outcomes (2026-04-29) — three decisions applied to the spec; status flip
 
 ## Current state
 
-**v0.1.0 shipped to npm 2026-04-09. v0.2.0 Phase 6 (instance lifecycle / `dispose()`) complete and merged into `dev` 2026-04-30. Active branch `feat/v0.2-hardening` carries the remaining v0.2.0 hardening backlog. Gaps 1 (concurrency, spec-only), 4 (OTel re-attach), and 6 (memory release) shipped 2026-05-01; Gap 3 (fleet serialization) shipped 2026-05-02. 2 open gaps remain (Gap 5, 8); Gap 7 deferred to v0.3.0. Test floor 1116 → 1184.**
+**v0.1.0 shipped to npm 2026-04-09. v0.2.0 Phase 6 (instance lifecycle / `dispose()`) complete and merged into `dev` 2026-04-30. Active branch `feat/v0.2-hardening` carries the remaining v0.2.0 hardening backlog. Gaps 1 (concurrency, spec-only), 4 (OTel re-attach), and 6 (memory release) shipped 2026-05-01; Gaps 3 (fleet serialization) and 5 (assess@500 perf, ~37× speedup) shipped 2026-05-02. 1 open gap remains (Gap 8 — runtime compat statement); Gap 7 deferred to v0.3.0. Test floor 1116 → 1199.**
 
 v0.1.0 baseline:
 - 33/33 build tasks done across 5 phases (~10,200 source LOC, ~15,500 test LOC)
@@ -298,10 +298,10 @@ Key Phase 6 implementation decisions (recorded in `IMPL_JOURNAL.md` per-task not
 
 v0.2.0 hardening backlog (drafted on `feat/v0.2-hardening`, commit `f32822f`):
 - `V0_2_0_BACKLOG.md` — actionable plan covering the remaining 7 gaps from `V0_2_0_DESIGN_STRATEGY.md`
-- Gap 2 (dispose) — done (Phase 6). Gap 1 (concurrency) — **done 2026-05-01** (spec-only amendment to `cl-spec-007` §12 + cross-refs in `cl-spec-005`/`006`/`012`). Gap 4 (OTel re-attach) — **done 2026-05-01** (`cl-spec-013` §2.1.3 + Invariants 10/11; `impl/I-07-otel-reattach.md`; `ContextLensExporter.attach()` + gauge management refactor; 9 unit + 2 integration tests). Gap 6 (memory release) — **done 2026-05-01** (`cl-spec-007` §8.9 + `cachesCleared` event; cross-refs in `cl-spec-005` §5.5, `cl-spec-006` §5.6, `cl-spec-009` §6.5; `impl/I-08-memory-release.md`; `LruCache.resize` + `clearCaches`/`setCacheSize`/`getMemoryUsage`; 38 unit + 1 integration tests). Gap 3 (fleet serialization) — **done 2026-05-02** (`cl-spec-012` §8 + Invariants 10–12; `cl-spec-014` §5 amendment; `impl/I-09-fleet-serialization.md`; `ContextLensFleet.snapshot()` + `static fromSnapshot()`; 13 unit + 3 integration tests). Gaps 5, 8 — open. Gap 7 (provider resilience) — deferred to v0.3.0
-- Decision locks confirmed 2026-05-01 / 02: read-read overlap not permitted (Gap 1, applied); mutable exporter binding (Gap 4, applied); no multi-instance fan-in on exporter (Gap 4, applied); Gap 5 option (b) incremental similarity cache picked, with (a) tighter sampling as fallback above N; estimate `getMemoryUsage` (Gap 6, applied); `setCacheSize(kind, 0)` permitted (Gap 6, applied); pattern-state cache preserved across fleet snapshot/restore (Gap 3, applied); runtime statement-now-CI-later split (Gap 8)
-- Recommended next sequence (post-Gap-3): Gap 5 (assess@500 perf, new `cl-spec-016`) → Gap 8 (runtime compat statement)
-- Total remaining scope (2 open gaps): ~10–15 commits, ~5–8 build tasks, ~10–20 new tests, 2 spec amendments + 1 new spec (`cl-spec-016` for Gap 5 option b), 1 new impl spec
+- Gap 2 (dispose) — done (Phase 6). Gap 1 (concurrency) — **done 2026-05-01** (spec-only amendment to `cl-spec-007` §12 + cross-refs in `cl-spec-005`/`006`/`012`). Gap 4 (OTel re-attach) — **done 2026-05-01** (`cl-spec-013` §2.1.3 + Invariants 10/11; `impl/I-07-otel-reattach.md`; `ContextLensExporter.attach()` + gauge management refactor; 9 unit + 2 integration tests). Gap 6 (memory release) — **done 2026-05-01** (`cl-spec-007` §8.9 + `cachesCleared` event; cross-refs in `cl-spec-005` §5.5, `cl-spec-006` §5.6, `cl-spec-009` §6.5; `impl/I-08-memory-release.md`; `LruCache.resize` + `clearCaches`/`setCacheSize`/`getMemoryUsage`; 38 unit + 1 integration tests). Gap 3 (fleet serialization) — **done 2026-05-02** (`cl-spec-012` §8 + Invariants 10–12; `cl-spec-014` §5 amendment; `impl/I-09-fleet-serialization.md`; `ContextLensFleet.snapshot()` + `static fromSnapshot()`; 13 unit + 3 integration tests). Gap 5 (assess@500 perf) — **done 2026-05-02** (`cl-spec-016` new spec; `cl-spec-002` §3.4 + `cl-spec-009` §3.3 amendments; `impl/I-10-similarity-caching.md`; adaptive `densitySampleCap` + `similarityCacheSize` config; 4 density + 8 config + 3 property tests; **bench: assess@500 ~341 ms → ~9.2 ms, ~37× speedup**). Gap 8 — open. Gap 7 (provider resilience) — deferred to v0.3.0
+- Decision locks confirmed 2026-05-01 / 02: read-read overlap not permitted (Gap 1, applied); mutable exporter binding (Gap 4, applied); no multi-instance fan-in on exporter (Gap 4, applied); Gap 5 option (b) incremental similarity cache (applied); estimate `getMemoryUsage` (Gap 6, applied); `setCacheSize(kind, 0)` permitted (Gap 6, applied); pattern-state cache preserved across fleet snapshot/restore (Gap 3, applied); runtime statement-now-CI-later split (Gap 8)
+- Recommended next sequence (post-Gap-5): Gap 8 (runtime compat statement, single paragraph)
+- Total remaining scope (1 open gap): ~1–2 commits, 0 build tasks, 0 new tests, 1 spec amendment, 0 new specs, 0 new impl specs
 
 ### What's built
 
@@ -342,13 +342,13 @@ Phase 6 exit (v0.2.0 dispose, merged into `dev` 2026-04-30): **1116 tests** acro
 
 **Resume on `feat/v0.2-hardening` (origin/feat/v0.2-hardening). Open `V0_2_0_BACKLOG.md` for the canonical plan with per-gap scope, decision locks, and commit estimates.**
 
-Active branch state: `feat/v0.2-hardening` is ~16 commits ahead of `dev` — backlog plan + 1 commit Gap 1 + 5-commit Gap 4 + 4-commit Gap 6 + 4-commit Gap 3 (specs, impl spec, code, tests) + tracking syncs. `dev` carries Phase 6 (merge `0c35bf5`) plus the 4 post-v0.1.0 chore commits previously only on `main`. `main` unchanged. `feat/dispose-lifecycle` preserved on origin for archaeology.
+Active branch state: `feat/v0.2-hardening` is ~21 commits ahead of `dev` — backlog plan + 1 commit Gap 1 + 5-commit Gap 4 + 4-commit Gap 6 + 4-commit Gap 3 + 4-commit Gap 5 (spec, impl spec, code, tests) + tracking syncs. `dev` carries Phase 6 (merge `0c35bf5`) plus the 4 post-v0.1.0 chore commits previously only on `main`. `main` unchanged. `feat/dispose-lifecycle` preserved on origin for archaeology.
 
-**All 8 decision locks applied or confirmed.** Gaps 1, 3, 4, 6 are shipped (locks applied). Gap 5's option (b) lock and Gap 8's split lock are confirmed and ready. No remaining decisions block spec work on the open gaps.
+**All 8 decision locks applied.** Gaps 1, 3, 4, 5, 6 are shipped. Gap 8's split lock is confirmed and trivial to land (single paragraph in cl-spec-009 + tracking sync). After Gap 8 the v0.2.0 hardening backlog is complete; the next moves are merging this branch into `dev`, then `dev` into `main`, version bump to 0.2.0, npm publish, CHANGELOG sign-off.
 
-**Recommended next task on this branch:** Gap 5 (`assess@500` perf — new `cl-spec-016 Similarity Caching & Sampling` coordinating spec, amendments to `cl-spec-002` §5 and `cl-spec-009`, impl spec, ~5–7 build tasks adding pairwise-cache invalidation hooks and a `similarityCacheSize` constructor option). Property test required: `assess()` output identical across cache-warm and cache-cold states. Then Gap 8 (runtime compat statement, single paragraph in `cl-spec-009`).
+**Recommended next task on this branch:** Gap 8 (runtime compat statement — single paragraph in `cl-spec-009` declaring browser/Deno/Bun/edge compatibility for the core library given TextEncoder availability; OTel exporter remains Node-only). No code; CI matrix is deferred follow-up.
 
-Each gap follows the spec-driven workflow: design spec or amendment → impl spec → coding tasks → regression sweep → commit cadence (one task = one commit, clean tree between each, hard floor now 1184 tests).
+Each gap follows the spec-driven workflow: design spec or amendment → impl spec → coding tasks → regression sweep → commit cadence (one task = one commit, clean tree between each, hard floor now 1199 tests).
 
 See `SHIPPING.md` for the v0.2.0 / v0.3.0 release plan (revised 2026-04-30 to reflect Phase 6 completion and the bundle-vs-cut decision).
 
