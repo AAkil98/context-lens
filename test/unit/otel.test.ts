@@ -46,7 +46,12 @@ function createMockMeterProvider() {
       gauges.push(record);
       return {
         addCallback(cb: (result: OTelObservableResult) => void) {
+          // Re-arm: addCallback after removeCallback (re-attach cycle per
+          // cl-spec-013 §2.1.3) clears the removed flag and installs the
+          // fresh callback. Mirrors real OTel behavior — instruments
+          // accept new callbacks indefinitely.
           record.callback = cb;
+          record.removed = false;
         },
         removeCallback(_cb: (result: OTelObservableResult) => void) {
           record.removed = true;
@@ -618,6 +623,240 @@ describe('ContextLensExporter — Unit Tests', () => {
       new ContextLensExporter(lens, { meterProvider: mock.meterProvider, label: 'win' });
       expect(() => lens.dispose()).not.toThrow();
       expect(lens.isDisposed).toBe(true);
+    });
+  });
+
+  // ── Re-attach (cl-spec-013 §2.1.3) ───────────────────────────
+
+  describe('Re-attach (cl-spec-013 §2.1.3)', () => {
+    it('attach() on a still-connected exporter throws', () => {
+      const exporter = new ContextLensExporter(lens, {
+        meterProvider: mock.meterProvider,
+        label: 'win',
+      });
+      const lens2 = makeLens(10000);
+      expect(() => exporter.attach(lens2)).toThrow(/currently attached/);
+      // Original instance still wired up.
+      lens.add(distinctContent(0));
+      lens.assess();
+      expect(mock.getCounter('context_lens.assess_count')!.total).toBe(1);
+    });
+
+    it('attach() to an already-disposed instance throws DisposedError', () => {
+      const exporter = new ContextLensExporter(lens, {
+        meterProvider: mock.meterProvider,
+        label: 'win',
+      });
+      exporter.disconnect();
+
+      const lens2 = makeLens(10000);
+      lens2.dispose();
+
+      expect(() => exporter.attach(lens2)).toThrow(DisposedError);
+    });
+
+    it('attach() leaves the exporter detached on DisposedError (no partial attach)', () => {
+      const exporter = new ContextLensExporter(lens, {
+        meterProvider: mock.meterProvider,
+        label: 'win',
+      });
+      exporter.disconnect();
+
+      const disposedLens = makeLens(10000);
+      disposedLens.dispose();
+      expect(() => exporter.attach(disposedLens)).toThrow(DisposedError);
+
+      // Should still be retargetable to a live instance.
+      const liveLens = makeLens(10000);
+      expect(() => exporter.attach(liveLens)).not.toThrow();
+
+      liveLens.add(distinctContent(0));
+      liveLens.assess();
+      expect(mock.getCounter('context_lens.assess_count')!.total).toBe(1);
+    });
+
+    it('attach() resets stored gauge state — first assess on the new instance repopulates', () => {
+      const exporter = new ContextLensExporter(lens, {
+        meterProvider: mock.meterProvider,
+        label: 'win',
+      });
+
+      lens.add(distinctContent(0));
+      lens.add(distinctContent(1));
+      lens.assess();
+
+      // Quality gauges populated from instance A.
+      let observed = mock.collectGauges();
+      expect(observed.has('context_lens.coherence')).toBe(true);
+      expect(observed.get('context_lens.segment_count')!.value).toBe(2);
+
+      exporter.disconnect();
+
+      const lens2 = makeLens(10000);
+      exporter.attach(lens2);
+
+      // Before any assess on instance B: quality gauges should not produce
+      // observations (hasQualityValues was reset). Capacity gauges revert
+      // to construction-time defaults — all 0 — and populate on first
+      // reportGenerated. Headroom in particular reads 0 (not `capacity`)
+      // because the exporter does not synthesize capacity metadata at
+      // attach time; it waits for the new instance's first assess.
+      observed = mock.collectGauges();
+      expect(observed.has('context_lens.coherence')).toBe(false);
+      expect(observed.has('context_lens.density')).toBe(false);
+      expect(observed.has('context_lens.relevance')).toBe(false);
+      expect(observed.has('context_lens.continuity')).toBe(false);
+      expect(observed.has('context_lens.composite')).toBe(false);
+      expect(observed.get('context_lens.segment_count')!.value).toBe(0);
+      expect(observed.get('context_lens.headroom')!.value).toBe(0);
+      expect(observed.get('context_lens.utilization')!.value).toBe(0);
+      expect(observed.get('context_lens.pattern_count')!.value).toBe(0);
+
+      // After first assess on instance B, quality gauges repopulate and
+      // capacity gauges reflect the new instance's actual state.
+      lens2.add(distinctContent(2));
+      lens2.add(distinctContent(3));
+      lens2.assess();
+
+      observed = mock.collectGauges();
+      expect(observed.has('context_lens.coherence')).toBe(true);
+      expect(observed.get('context_lens.segment_count')!.value).toBe(2);
+      expect(observed.get('context_lens.headroom')!.value).toBeGreaterThan(0);
+    });
+
+    it('attach() preserves counter monotonicity across the cycle', () => {
+      const exporter = new ContextLensExporter(lens, {
+        meterProvider: mock.meterProvider,
+        label: 'win',
+      });
+
+      const seg1 = lens.add(distinctContent(0)) as import('../../src/types.js').Segment;
+      lens.evict(seg1.id);
+      const evictionsAfterFirst = mock.getCounter('context_lens.evictions_total')!.total;
+      expect(evictionsAfterFirst).toBe(1);
+
+      // Capture the counter instrument identity to verify reuse.
+      const counterCallsBefore = mock.getCounter('context_lens.evictions_total')!.calls.length;
+
+      exporter.disconnect();
+      const lens2 = makeLens(10000);
+      exporter.attach(lens2);
+
+      const seg2 = lens2.add(distinctContent(1)) as import('../../src/types.js').Segment;
+      lens2.evict(seg2.id);
+
+      // Same counter records both pre-detach and post-attach evictions.
+      const counter = mock.getCounter('context_lens.evictions_total')!;
+      expect(counter.total).toBe(2);
+      expect(counter.calls.length).toBe(counterCallsBefore + 1);
+      // Only one counter instrument exists per name (no re-registration on attach).
+      expect(mock.counters.filter(c => c.name === 'context_lens.evictions_total')).toHaveLength(1);
+    });
+
+    it('attach() preserves the assess_duration_ms histogram across the cycle', () => {
+      const exporter = new ContextLensExporter(lens, {
+        meterProvider: mock.meterProvider,
+        label: 'win',
+      });
+
+      lens.add(distinctContent(0));
+      lens.assess();
+      const observationsBefore = mock.getHistogram('context_lens.assess_duration_ms')!.values.length;
+
+      exporter.disconnect();
+      const lens2 = makeLens(10000);
+      exporter.attach(lens2);
+
+      lens2.add(distinctContent(1));
+      lens2.assess();
+
+      const histogram = mock.getHistogram('context_lens.assess_duration_ms')!;
+      expect(histogram.values.length).toBe(observationsBefore + 1);
+      expect(mock.histograms.filter(h => h.name === 'context_lens.assess_duration_ms')).toHaveLength(1);
+    });
+
+    it('attach() re-subscribes to instance events', () => {
+      const exporter = new ContextLensExporter(lens, {
+        meterProvider: mock.meterProvider,
+        label: 'win',
+      });
+      exporter.disconnect();
+
+      const lens2 = makeLens(10000);
+      exporter.attach(lens2);
+
+      const beforeAssess = mock.getCounter('context_lens.assess_count')!.total;
+      lens2.add(distinctContent(0));
+      lens2.assess();
+      expect(mock.getCounter('context_lens.assess_count')!.total).toBe(beforeAssess + 1);
+
+      // Eviction on the re-attached instance also flows through.
+      const seg = lens2.add(distinctContent(1)) as import('../../src/types.js').Segment;
+      lens2.evict(seg.id);
+      expect(mock.getCounter('context_lens.evictions_total')!.total).toBeGreaterThanOrEqual(1);
+    });
+
+    it('attach() re-handshakes lifecycle integration — disposing the new instance fires the disposal log', () => {
+      const { logProvider, logs } = createMockLoggerProvider();
+      const exporter = new ContextLensExporter(lens, {
+        meterProvider: mock.meterProvider,
+        label: 'win',
+        logProvider,
+      });
+      // Dispose original — first disposal log fires for `lens.instanceId`.
+      const firstId = lens.instanceId;
+      lens.dispose();
+
+      const lens2 = makeLens(10000);
+      const secondId = lens2.instanceId;
+      exporter.attach(lens2);
+
+      lens2.add(distinctContent(0));
+      lens2.dispose();
+
+      const disposalLogs = logs.filter(l => l.body === 'context_lens.instance.disposed');
+      expect(disposalLogs).toHaveLength(2);
+      expect(disposalLogs[0]!.attributes!['instance.id']).toBe(firstId);
+      expect(disposalLogs[1]!.attributes!['instance.id']).toBe(secondId);
+    });
+
+    it('disconnect → attach → disconnect cycle: counters accumulate, gauges reset each cycle', () => {
+      const exporter = new ContextLensExporter(lens, {
+        meterProvider: mock.meterProvider,
+        label: 'win',
+      });
+
+      // Cycle 1: lens, populate, disconnect.
+      const seg1 = lens.add(distinctContent(0)) as import('../../src/types.js').Segment;
+      lens.evict(seg1.id);
+      lens.assess();
+      exporter.disconnect();
+
+      // Cycle 2: lens2, populate, disconnect.
+      const lens2 = makeLens(10000);
+      exporter.attach(lens2);
+      const seg2 = lens2.add(distinctContent(1)) as import('../../src/types.js').Segment;
+      lens2.evict(seg2.id);
+      lens2.assess();
+      exporter.disconnect();
+
+      // Cycle 3: lens3, populate, leave attached.
+      const lens3 = makeLens(10000);
+      exporter.attach(lens3);
+      const seg3 = lens3.add(distinctContent(2)) as import('../../src/types.js').Segment;
+      lens3.evict(seg3.id);
+      lens3.assess();
+
+      // Counters reflect all three cycles on the same instrument.
+      expect(mock.getCounter('context_lens.evictions_total')!.total).toBe(3);
+      expect(mock.getCounter('context_lens.assess_count')!.total).toBe(3);
+      expect(mock.counters.filter(c => c.name === 'context_lens.evictions_total')).toHaveLength(1);
+
+      // Histogram accumulated three observations.
+      expect(mock.getHistogram('context_lens.assess_duration_ms')!.values.length).toBe(3);
+
+      // Gauge instruments are still the same set — no extras created per cycle.
+      expect(mock.gauges).toHaveLength(9);
     });
   });
 });
