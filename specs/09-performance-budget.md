@@ -58,6 +58,10 @@ These are context-lens computation budgets — they exclude time spent inside th
 - **Measurable.** Every public operation records its own latency. Diagnostics (cl-spec-010) surface per-operation timing, cache hit rates, and budget violations. The caller can verify that context-lens is within budget, not just trust that it is.
 - **Advisory, not enforced.** Budget targets are design commitments, not runtime enforcement. No operation is aborted for exceeding its budget. This matches context-lens's philosophy of soft constraints — it reports and advises, it does not enforce (cl-spec-001 invariant 14, soft capacity; cl-spec-003, diagnostic not prescriptive patterns).
 
+### 1.1 Runtime Compatibility
+
+The core library (`context-lens`) targets any single-threaded JavaScript runtime that exposes `TextEncoder` from the platform standard library. This includes Node.js (≥18), Deno, Bun, modern browsers (Chromium, Firefox, Safari at recent stable channels), and edge runtimes (Cloudflare Workers, Vercel Edge, Deno Deploy). The library imports nothing from `node:` schemes, uses no Buffer or other Node-specific APIs, and assumes nothing about the file system, network, or process model. Concurrency expectations are captured by cl-spec-007 §12 — single-threaded, sequential per instance — which all listed runtimes satisfy by their event-loop architecture. The OTel exporter (`context-lens/otel`, cl-spec-013) is the only runtime-restricted entry point: it depends on `@opentelemetry/api` (peer dependency) and the OTel SDK adapters callers wire to it, both of which are Node-leaning ecosystems in practice. Browser and edge callers who want observability should consume the metrics surface directly (gauges and counters via `getDiagnostics()`, cl-spec-010) rather than the OTel adapter. CI verification across the full runtime matrix is a deferred follow-up — this spec declares the compatibility intent; matrix-level test coverage will land alongside or after v0.2.0 release.
+
 ---
 
 ## 2. Budget Framework

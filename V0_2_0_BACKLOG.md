@@ -19,7 +19,7 @@
 | 5 | `assess@500` over budget | **done** | new `cl-spec-016` Similarity Caching & Sampling + `cl-spec-002`/`009` amendments + impl spec `I-10-similarity-caching.md` + adaptive `densitySampleCap` + `similarityCacheSize` config |
 | 6 | Memory release | **done** | `cl-spec-007` §8.9 (new) + `cachesCleared` event + impl spec `I-08-memory-release.md` + LruCache.resize + `clearCaches`/`setCacheSize`/`getMemoryUsage` |
 | 7 | Provider resilience | **deferred** | recommended to v0.3.0 in V0_2_0_DESIGN_STRATEGY.md |
-| 8 | Runtime compatibility statement | open | one-paragraph addition to `cl-spec-009` |
+| 8 | Runtime compatibility statement | **done** | `cl-spec-009` §1.1 (new subsection) |
 
 ## Recommended sequence
 
@@ -30,7 +30,7 @@ Dependency order from V0_2_0_DESIGN_STRATEGY.md, refreshed for post-Phase-6 stat
 3. ~~**Gap 6 — Memory release**~~ — **done 2026-05-01.** `cl-spec-007` §8.9 (new section: clearCaches/setCacheSize/getMemoryUsage) + `cachesCleared` event (catalog 25 → 26) + cross-refs in `cl-spec-005` §5.5, `cl-spec-006` §5.6, `cl-spec-009` §6.5; `impl/I-08-memory-release.md`; `LruCache.resize` + per-cache setCacheSize/getEntryCount/getMaxEntries hooks (embedding adds getEntryByteEstimate); 39 new tests (38 unit + 1 integration). 1128 → 1167 tests / 40 files / typecheck clean.
 4. ~~**Gap 3 — Fleet serialization**~~ — **done 2026-05-02.** `cl-spec-012` §8 (new section: 8.1 Snapshot, 8.2 Restore, 8.3 Format Versioning) + Invariants 10–12; `cl-spec-014` §5 amendment acknowledging fleet wrapping; `impl/I-09-fleet-serialization.md`; `ContextLensFleet.snapshot()` + `static fromSnapshot()` in `src/fleet.ts`; 13 unit + 3 integration tests. 1167 → 1184 tests / 40 → 41 files / typecheck clean.
 5. ~~**Gap 5 — `assess@500`**~~ — **done 2026-05-02.** New `cl-spec-016` Similarity Caching & Sampling spec; `cl-spec-002` §3.4 + `cl-spec-009` §3.3 amendments; `impl/I-10-similarity-caching.md`; adaptive `densitySampleCap(n)` step function + new `similarityCacheSize` constructor option with capacity-scaling default formula; 15 new tests (4 density + 8 config + 3 property). 1184 → 1199 tests / 41 → 42 files / typecheck clean. **Bench delta: assess@500 ~341 ms → ~9.2 ms (~37× speedup).** Cache-warm/cache-cold determinism (Invariant 1) verified by property test over 50+ runs.
-6. **Gap 8 — Runtime compatibility statement** (one paragraph; can land any time, ordered last because it depends on the v0.2.0 surface being settled)
+6. ~~**Gap 8 — Runtime compatibility statement**~~ — **done 2026-05-02.** New `cl-spec-009` §1.1 subsection declaring the core library compatible with Node.js (≥18), Deno, Bun, modern browsers, and edge runtimes (Cloudflare Workers, Vercel Edge, Deno Deploy) given `TextEncoder` availability. The OTel exporter remains the only runtime-restricted entry point (Node-leaning by virtue of the OTel SDK ecosystem). CI matrix-level verification across runtimes is a deferred follow-up. Pure spec-only change, no code, no tests.
 
 Gap 7 (provider resilience) is **deferred** unless the user revives it.
 
@@ -168,19 +168,20 @@ Each block below: scope, design surface, impl surface, test surface, commit esti
 
 > Long-lived instances accumulate cache memory up to the configured bounds with no manual release. New methods: `clearCaches(kind?)`, `setCacheSize(kind, size)`, `getMemoryUsage()`.
 
-### Gap 8 — Runtime compatibility statement
+### Gap 8 — Runtime compatibility statement — DONE (2026-05-02)
 
-**Scope:** Spec-level statement that the core library is compatible with browser, Deno, Bun, and edge runtimes provided `TextEncoder` is available. OTel exporter remains Node-only.
+**Shipped on `feat/v0.2-hardening`** as a single bundled commit (spec + tracking sync).
 
-**Design work:** Single paragraph in `cl-spec-009` (Performance Budget — already scopes runtime assumptions).
+**What landed:**
+- `cl-spec-009` §1.1 Runtime Compatibility (new subsection at the end of §1 Overview): declares the core `context-lens` package compatible with any single-threaded JavaScript runtime that exposes `TextEncoder` — Node.js (≥18), Deno, Bun, modern browsers (Chromium, Firefox, Safari recent stable), and edge runtimes (Cloudflare Workers, Vercel Edge, Deno Deploy). No `node:` scheme imports, no Buffer / file-system / process-model assumptions. Concurrency expectations defer to cl-spec-007 §12.
+- The OTel exporter (`context-lens/otel`, cl-spec-013) is the only runtime-restricted entry point — depends on `@opentelemetry/api` and Node-leaning SDK ecosystem in practice. Browser and edge callers who want observability are routed to the diagnostics surface directly via `getDiagnostics()`.
+- CI verification across the full matrix is a deferred follow-up. v0.2.0 ships the compatibility intent; matrix-level test coverage will land alongside or after release.
 
-**Impl work:** None for the statement. Verification (test matrix across runtimes) is a separate CI task and can land as a follow-up.
+**Decision lock applied (per user thumbs-up 2026-05-01):** statement-now / verification-later split.
 
-**Test work:** None for the statement. CI matrix is a deferred chore.
+**Original scope** (kept here for historical reference):
 
-**Commits:** 1 spec amendment.
-**Dependencies:** None.
-**Decisions:** statement-now / verification-later split (recommended).
+> Spec-level statement that the core library is compatible with browser, Deno, Bun, and edge runtimes provided `TextEncoder` is available. OTel exporter remains Node-only.
 
 ### Gap 7 — Provider resilience (deferred)
 
@@ -202,19 +203,19 @@ Per V0_2_0_DESIGN_STRATEGY.md "Non-goals":
 
 ## Total scope estimate
 
-Remaining after Gaps 1, 3, 4, 5, and 6 shipped (2026-05-01 / 02):
+**v0.2.0 hardening backlog complete** (2026-05-02). Gaps 1, 3, 4, 5, 6, 8 shipped. Gap 2 (dispose) shipped earlier in Phase 6. Gap 7 (provider resilience) deferred to v0.3.0.
 
 | Surface | Count |
 |---------|------:|
-| Design specs (new) | 0 (cl-spec-016 shipped with Gap 5) |
-| Design specs (amended) | 1 remaining (cl-spec-009 for Gap 8) |
-| Impl specs (new) | 0 remaining (Gap 8 is spec-only) |
-| Build tasks | 0 |
-| New unit + integration tests | 0 |
-| New benchmarks | 0 |
-| Net remaining commits on `feat/v0.2-hardening` | 1–2 (Gap 8 spec amendment + tracking sync) |
+| Design specs (new) | 1 (cl-spec-016) |
+| Design specs (amended) | 7 (cl-spec-002, 005, 006, 007, 009, 012, 013, 014) |
+| Impl specs (new) | 4 (I-07, I-08, I-09, I-10) |
+| Build tasks | ~22 across the four impl specs |
+| New unit + integration + property tests | ~83 (1116 → 1199) |
+| New benchmarks | 0 (existing benches verified the perf delta) |
+| Net commits on `feat/v0.2-hardening` | ~22 |
 
-Done so far on `feat/v0.2-hardening`: ~21 commits (Gap 1: 1, Gap 4: 5, Gap 6: 4, Gap 3: 4, Gap 5: 4 + tracking syncs). Tests grew from 1116 (Phase 6 exit) to 1199 (current).
+Done on `feat/v0.2-hardening`: ~22 commits — Gap 1 (1), Gap 4 (5), Gap 6 (4), Gap 3 (4), Gap 5 (4), Gap 8 (1) + tracking syncs. Tests grew from 1116 (Phase 6 exit) to 1199. Bench: `assess@500` ~341 ms → ~9.2 ms (~37×).
 
 **Risk-weighted "ship dispose alone as v0.2.0, defer the rest to v0.2.1+v0.3.0" alternative:** still on the table per `SHIPPING.md` revision. The user picked option (2) — bundle — so this plan continues forward.
 
@@ -222,9 +223,27 @@ Done so far on `feat/v0.2-hardening`: ~21 commits (Gap 1: 1, Gap 4: 5, Gap 6: 4,
 
 ## Recommended next action
 
-**Gap 8 — Runtime compatibility statement.** Single-paragraph addition to `cl-spec-009` declaring that the core library is compatible with browser, Deno, Bun, and edge runtimes provided `TextEncoder` is available; OTel exporter remains Node-only. No code changes; a CI matrix verification is a deferred follow-up. ~1 commit.
+**Cut v0.2.0.** The hardening backlog is complete. Suggested release sequence:
 
-After Gap 8 lands: v0.2.0 hardening backlog is complete. Time to think about cutting v0.2.0 — merge `feat/v0.2-hardening` into `dev`, then `dev` into `main`, version bump to 0.2.0, npm publish, CHANGELOG sign-off.
+1. Merge `feat/v0.2-hardening` into `dev` (squash or merge-commit, caller's preference).
+2. Run the full test + bench + typecheck sweep one more time on `dev`.
+3. Merge `dev` into `main`.
+4. Version bump in `package.json` (0.1.0 → 0.2.0).
+5. Update `CHANGELOG.md` with the v0.2.0 entry — pull from the per-gap "DONE" blocks above.
+6. `npm publish` from `main`.
+7. Tag `v0.2.0` on `main`. Push the tag.
+
+The accumulated v0.2.0 surface deltas vs v0.1.0:
+- New methods: `dispose`, `clearCaches`, `setCacheSize`, `getMemoryUsage`, `ContextLensFleet.snapshot`, `static ContextLensFleet.fromSnapshot`, `ContextLensExporter.attach`
+- New getters: `isDisposed`, `isDisposing`, `instanceId`
+- New events: `stateDisposed`, `cachesCleared` (catalog 24 → 26)
+- New errors: `DisposedError`, `DisposalError`
+- New config fields: `similarityCacheSize`
+- New design specs: `cl-spec-015` (Phase 6), `cl-spec-016` (Gap 5)
+- New impl specs: `I-06`, `I-07`, `I-08`, `I-09`, `I-10`
+- Bench: `assess@500` ~341 ms → ~9.2 ms
+
+Gap 7 (provider resilience) waits for v0.3.0 unless a consumer hits it.
 
 ---
 
