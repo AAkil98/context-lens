@@ -870,3 +870,70 @@ export interface MemoryUsage {
   /** Sum of the three caches' estimatedBytes. */
   totalEstimatedBytes: number;
 }
+
+// ─── Fleet Serialization Domain (cl-spec-012 §8) ──────────────────
+
+/**
+ * Per-instance fleet-level diff state captured in a fleet snapshot.
+ * Mirrors the runtime InstanceState minus the references that cannot
+ * be serialized (`instance`, `handle`).
+ *
+ * @see cl-spec-012 §8.1.1
+ */
+export interface FleetTrackingState {
+  /** Names of patterns that were active on this instance at snapshot time. */
+  activePatterns: string[];
+  /** Per-pattern activation timestamps for duration computation on resolve. */
+  patternActivatedAt: Record<string, number>;
+  /** Wall-clock at the most recent fresh assessment of this instance through the fleet. Null if never assessed via the fleet. */
+  lastAssessedAt: number | null;
+}
+
+/**
+ * Fleet-level diff state captured in a fleet snapshot.
+ * @see cl-spec-012 §8.1.2
+ */
+export interface FleetState {
+  /** Whether the fleet is currently in degraded state (drives fleetDegraded/fleetRecovered diffing). */
+  fleetDegradedState: boolean;
+}
+
+/**
+ * One entry in {@link SerializedFleet.instances}.
+ * @see cl-spec-012 §8.1.2
+ */
+export interface SerializedFleetInstance {
+  label: string;
+  snapshot: SerializedState;
+  trackingState: FleetTrackingState;
+}
+
+/**
+ * Self-contained snapshot of a `ContextLensFleet`. Embeds one
+ * {@link SerializedState} per registered instance verbatim, plus the fleet's
+ * pattern-state cache and global diff flag.
+ *
+ * Format version is independent of {@link SerializedState.formatVersion}
+ * (cl-spec-014 §7) and the schema version (cl-spec-011 §6).
+ *
+ * @see cl-spec-012 §8
+ */
+export interface SerializedFleet {
+  formatVersion: 'context-lens-fleet-snapshot-v1';
+  timestamp: number;
+  fleetOptions: { degradationThreshold: number };
+  instances: SerializedFleetInstance[];
+  fleetState: FleetState;
+}
+
+/**
+ * Options for `ContextLensFleet.snapshot`.
+ * @see cl-spec-012 §8.1
+ */
+export interface FleetSnapshotOptions {
+  /**
+   * If false, every embedded instance snapshot is lightweight (content: null,
+   * restorable: false) per cl-spec-014 §6. Default true.
+   */
+  includeContent?: boolean;
+}
