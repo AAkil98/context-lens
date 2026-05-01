@@ -10,7 +10,7 @@ interface Node<K, V> {
 }
 
 export class LruCache<K, V> {
-  private readonly maxSize: number;
+  private maxSize: number;
   private readonly map = new Map<K, Node<K, V>>();
   private head: Node<K, V> | null = null;
   private tail: Node<K, V> | null = null;
@@ -21,6 +21,29 @@ export class LruCache<K, V> {
 
   get size(): number {
     return this.map.size;
+  }
+
+  get maxEntries(): number {
+    return this.maxSize;
+  }
+
+  /**
+   * Resize the cache's maximum-entry bound. On shrink, evicts least-recently-used
+   * entries until size <= newMaxSize. On grow, leaves entries unchanged. Setting
+   * newMaxSize to 0 drops every entry; subsequent set operations are immediate
+   * evictions.
+   *
+   * @param newMaxSize Non-negative integer. Caller is responsible for bounds checking.
+   * @returns Number of entries evicted as a result of the resize.
+   * @see cl-spec-007 §8.9.2
+   */
+  resize(newMaxSize: number): number {
+    const evicted = Math.max(0, this.map.size - newMaxSize);
+    this.maxSize = newMaxSize;
+    while (this.map.size > newMaxSize) {
+      this.removeTail();
+    }
+    return evicted;
   }
 
   get(key: K): V | undefined {

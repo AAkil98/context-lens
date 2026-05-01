@@ -35,11 +35,9 @@ export class EmbeddingEngine implements EmbeddingLookup {
   private provider: EmbeddingProvider | null = null;
   private metadata: EmbeddingProviderMetadata | null = null;
   private cache: LruCache<string, number[] | Set<string>>;
-  private readonly cacheSize: number;
   private readonly countTokens: (content: string) => number;
 
   constructor(cacheSize = DEFAULT_CACHE_SIZE, countTokens: (content: string) => number) {
-    this.cacheSize = cacheSize;
     this.cache = new LruCache(cacheSize);
     this.countTokens = countTokens;
   }
@@ -88,8 +86,10 @@ export class EmbeddingEngine implements EmbeddingLookup {
     this.provider = provider;
     this.metadata = { ...metadata };
 
-    // Full invalidation cascade
-    this.cache = new LruCache(this.cacheSize);
+    // Full invalidation cascade. Keep the LruCache instance (and its current
+    // maxSize) — preserves any setCacheSize call the caller made before the
+    // provider switch (cl-spec-005 §5.5, cl-spec-007 §8.9).
+    this.cache.clear();
     onCacheClear();
 
     // Re-embed all active segments
@@ -109,7 +109,7 @@ export class EmbeddingEngine implements EmbeddingLookup {
     this.provider = null;
     this.metadata = null;
 
-    this.cache = new LruCache(this.cacheSize);
+    this.cache.clear();
     onCacheClear();
 
     return { oldName };
@@ -208,8 +208,55 @@ export class EmbeddingEngine implements EmbeddingLookup {
     this.cache.delete(`${contentHash}:${TRIGRAM_PROVIDER_NAME}`);
   }
 
+  /**
+   * Empty the embedding/trigram cache. Called by the public clearCaches API
+   * (cl-spec-007 §8.9.1) and the teardown orchestrator (cl-spec-015 §4.1).
+   * Active segments retain their content; the next assess() re-prepares
+   * (re-embeds or re-trigrams) any active segment that needs similarity
+   * computation.
+   * @see cl-spec-005 §5.5
+   */
   clearCache(): void {
-    this.cache = new LruCache(this.cacheSize);
+    this.cache.clear();
+  }
+
+  /**
+   * Resize the embedding cache at runtime. Drops least-recently-used entries
+   * on shrink. Setting size to 0 disables the cache (every embedding lookup
+   * becomes a miss).
+   * @returns Number of entries evicted by the resize.
+   * @see cl-spec-005 §5.5, cl-spec-007 §8.9.2
+   */
+  setCacheSize(size: number): number {
+    return this.cache.resize(size);
+  }
+
+  /** Current number of cache entries. */
+  getEntryCount(): number {
+    return this.cache.size;
+  }
+
+  /** Configured maximum entries. */
+  getMaxEntries(): number {
+    return this.cache.maxEntries;
+  }
+
+  /**
+   * Mode-aware byte estimate per cache entry. Used by ContextLens.getMemoryUsage.
+   *
+   * - Embedding mode: dimensions × 8 + 100 bytes (Float64 vector + key + LRU overhead).
+   * - Trigram mode: 8000 bytes (conservative average for Set<string> at typical
+   *   content sizes; cl-spec-009 §6.5).
+   * - Empty cache: 0 (no per-entry estimate to apply).
+   *
+   * @see cl-spec-009 §6.5
+   */
+  getEntryByteEstimate(): number {
+    if (this.cache.size === 0) return 0;
+    if (this.metadata !== null) {
+      return this.metadata.dimensions * 8 + 100;
+    }
+    return 8000;
   }
 
   // ── Internal ────────────────────────────────────────────────────

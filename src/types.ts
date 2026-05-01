@@ -823,3 +823,50 @@ export type IntegrationTeardown<T = unknown> = (instance: T) => void;
 export interface IntegrationHandle {
   detach(): void;
 }
+
+// ─── Memory Management Domain (cl-spec-007 §8.9) ─────────────────
+
+/**
+ * Cache kinds supported by `clearCaches` and `setCacheSize`.
+ *
+ * - `'tokenizer'` — token count cache (cl-spec-006 §5)
+ * - `'embedding'` — embedding / trigram cache (cl-spec-005 §5)
+ * - `'similarity'` — pairwise similarity cache (cl-spec-002 §3.2)
+ * - `'all'` — all three (only valid for `clearCaches`; `setCacheSize` rejects
+ *   `'all'` because the three caches have different practical size ranges)
+ *
+ * @see cl-spec-007 §8.9
+ */
+export type CacheKind = 'tokenizer' | 'embedding' | 'similarity' | 'all';
+
+/**
+ * Per-cache memory snapshot returned within {@link MemoryUsage}.
+ * @see cl-spec-007 §8.9.3
+ */
+export interface CacheUsage {
+  /** Current entry count. */
+  entries: number;
+  /** Configured maximum (the value last set via setCacheSize or construction). */
+  maxEntries: number;
+  /**
+   * Approximate bytes consumed by current entries. Per-entry coefficient is
+   * documented in cl-spec-009 §6.5; expected error band ±20%.
+   */
+  estimatedBytes: number;
+}
+
+/**
+ * Memory usage snapshot returned by `ContextLens.getMemoryUsage`.
+ *
+ * Covers the three derived caches only — does not include segment content,
+ * history buffers, the continuity ledger, or other instance state.
+ *
+ * @see cl-spec-007 §8.9.3, cl-spec-009 §6.5
+ */
+export interface MemoryUsage {
+  tokenizer: CacheUsage;
+  embedding: CacheUsage;
+  similarity: CacheUsage;
+  /** Sum of the three caches' estimatedBytes. */
+  totalEstimatedBytes: number;
+}

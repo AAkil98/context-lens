@@ -25,6 +25,8 @@ import type {
   IntegrationTeardown,
   IntegrationHandle,
   LifecycleState,
+  CacheKind,
+  MemoryUsage,
 } from './types.js';
 import {
   ConfigurationError,
@@ -80,6 +82,27 @@ export interface SeedInput {
 
 /** Process-wide monotonic counter for {@link ContextLens.instanceId}. @see cl-spec-015 §2.5 */
 let INSTANCE_COUNTER = 0;
+
+/**
+ * Valid CacheKind values for {@link ContextLens.clearCaches}. Includes 'all'.
+ * @see cl-spec-007 §8.9
+ */
+const CACHE_KINDS: ReadonlySet<CacheKind> = new Set<CacheKind>([
+  'tokenizer',
+  'embedding',
+  'similarity',
+  'all',
+]);
+
+/**
+ * Valid CacheKind values for {@link ContextLens.setCacheSize} — 'all' is excluded
+ * because each cache has different practical size ranges (cl-spec-007 §8.9.2).
+ */
+const SETTABLE_CACHE_KINDS: ReadonlySet<Exclude<CacheKind, 'all'>> = new Set<Exclude<CacheKind, 'all'>>([
+  'tokenizer',
+  'embedding',
+  'similarity',
+]);
 
 // ─── ContextLens ──────────────────────────────────────────────────
 
@@ -740,6 +763,133 @@ export class ContextLens {
     );
 
     return deepCopy(plan);
+  }
+
+  // ── Memory Management (cl-spec-007 §8.9) ───────────────────────
+
+  /**
+   * Empty one or more derived caches. The segment store, baseline, continuity
+   * ledger, pattern history, report history, and any other history buffer are
+   * untouched — `clearCaches` is purely a memoization-layer primitive.
+   *
+   * For `'tokenizer'`: drops cached counts; segments retain their stored
+   * `tokenCount`. For `'embedding'`: drops cached vectors / trigram sets; the
+   * next `assess()` re-prepares content. For `'similarity'`: drops cached
+   * pairwise scores; the next `assess()` recomputes them. For `'all'`: clears
+   * all three.
+   *
+   * Emits one `cachesCleared` event with a per-cache `entriesCleared`
+   * breakdown — useful for ops dashboards and pre/post memory comparisons.
+   *
+   * @param kind Defaults to `'all'`.
+   * @throws ValidationError if `kind` is not a recognized CacheKind.
+   * @throws DisposedError if the instance is disposed.
+   * @see cl-spec-007 §8.9.1, cl-spec-009 §6.5
+   */
+  clearCaches(kind: CacheKind = 'all'): void {
+    guardDispose(this.lifecycleState, 'clearCaches', this.instanceId);
+    if (!CACHE_KINDS.has(kind)) {
+      throw new ValidationError(`Unknown cache kind: ${kind}`, { kind });
+    }
+
+    const entriesCleared = { tokenizer: 0, embedding: 0, similarity: 0 };
+
+    if (kind === 'tokenizer' || kind === 'all') {
+      entriesCleared.tokenizer = this.tokenizer.getEntryCount();
+      this.tokenizer.clearCache();
+    }
+    if (kind === 'embedding' || kind === 'all') {
+      entriesCleared.embedding = this.embedding.getEntryCount();
+      this.embedding.clearCache();
+    }
+    if (kind === 'similarity' || kind === 'all') {
+      entriesCleared.similarity = this.similarity.getEntryCount();
+      this.similarity.clearCache();
+    }
+
+    this.emitter.emit('cachesCleared', { kind, entriesCleared });
+  }
+
+  /**
+   * Resize a single cache's maximum-entry capacity at runtime. Shrinks evict
+   * least-recently-used entries until the new bound is satisfied; grows leave
+   * existing entries unchanged. `size = 0` disables the cache.
+   *
+   * Does not emit `cachesCleared` even when shrinking causes evictions —
+   * resize is a configuration change, not an explicit clear.
+   *
+   * @throws ValidationError if `kind` is not one of `'tokenizer'`,
+   *   `'embedding'`, `'similarity'`, or if `size` is not a non-negative integer.
+   * @throws DisposedError if the instance is disposed.
+   * @see cl-spec-007 §8.9.2, cl-spec-009 §6.5
+   */
+  setCacheSize(kind: Exclude<CacheKind, 'all'>, size: number): void {
+    guardDispose(this.lifecycleState, 'setCacheSize', this.instanceId);
+    if ((kind as CacheKind) === 'all') {
+      throw new ValidationError(
+        "setCacheSize: 'all' is not permitted; specify one of 'tokenizer' | 'embedding' | 'similarity'",
+        { kind },
+      );
+    }
+    if (!SETTABLE_CACHE_KINDS.has(kind)) {
+      throw new ValidationError(`Unknown cache kind: ${kind}`, { kind });
+    }
+    if (!Number.isInteger(size) || size < 0) {
+      throw new ValidationError('setCacheSize: size must be a non-negative integer', { size });
+    }
+
+    switch (kind) {
+      case 'tokenizer':
+        this.tokenizer.setCacheSize(size);
+        break;
+      case 'embedding':
+        this.embedding.setCacheSize(size);
+        break;
+      case 'similarity':
+        this.similarity.setCacheSize(size);
+        break;
+    }
+  }
+
+  /**
+   * Estimate of the instance's current cache memory consumption. Read-only;
+   * does not trigger any computation. The byte figures use the per-entry
+   * coefficients documented in cl-spec-009 §6.5 (typical error band ±20%).
+   *
+   * @throws DisposedError if the instance is disposed.
+   * @see cl-spec-007 §8.9.3, cl-spec-009 §6.5
+   */
+  getMemoryUsage(): MemoryUsage {
+    guardDispose(this.lifecycleState, 'getMemoryUsage', this.instanceId);
+
+    const tokenizerEntries = this.tokenizer.getEntryCount();
+    const embeddingEntries = this.embedding.getEntryCount();
+    const similarityEntries = this.similarity.getEntryCount();
+
+    const tokenizerBytes = tokenizerEntries * 100;
+    const embeddingBytes = embeddingEntries * this.embedding.getEntryByteEstimate();
+    const similarityBytes = similarityEntries * 80;
+
+    const totalEstimatedBytes = tokenizerBytes + embeddingBytes + similarityBytes;
+
+    return {
+      tokenizer: {
+        entries: tokenizerEntries,
+        maxEntries: this.tokenizer.getMaxEntries(),
+        estimatedBytes: tokenizerBytes,
+      },
+      embedding: {
+        entries: embeddingEntries,
+        maxEntries: this.embedding.getMaxEntries(),
+        estimatedBytes: embeddingBytes,
+      },
+      similarity: {
+        entries: similarityEntries,
+        maxEntries: this.similarity.getMaxEntries(),
+        estimatedBytes: similarityBytes,
+      },
+      totalEstimatedBytes,
+    };
   }
 
   // ── Task Operations ─────────────────────────────────────────────

@@ -103,6 +103,8 @@ export const READ_ONLY_METHODS: ReadonlySet<string> = new Set([
   'getConfig',
   'getPerformance',
   'getDetection',
+  // Gap 6 (cl-spec-007 §8.9.3) — memory inspection is read-only
+  'getMemoryUsage',
 ]);
 
 // ─── Disposed-state guard (impl-spec I-06 §4.1.4) ──────────────────

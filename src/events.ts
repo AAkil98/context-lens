@@ -14,6 +14,7 @@ import type {
   CompactionRecord,
   PatternName,
   Severity,
+  CacheKind,
 } from './types.js';
 
 // ─── Lifecycle Event (cl-spec-015 §7.1) ───────────────────────────
@@ -57,6 +58,14 @@ export interface ContextLensEventMap {
   reportGenerated: { report: QualityReport };
   budgetViolation: { operation: string; selfTime: number; budgetTarget: number };
   stateDisposed: StateDisposedEvent;
+  cachesCleared: {
+    kind: CacheKind;
+    entriesCleared: {
+      tokenizer: number;
+      embedding: number;
+      similarity: number;
+    };
+  };
 }
 
 // ─── Emitter ──────────────────────────────────────────────────────

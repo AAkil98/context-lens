@@ -61,11 +61,9 @@ type SimilarityMode = 'embedding' | 'trigram';
 
 export class SimilarityEngine {
   private cache: LruCache<string, number>;
-  private readonly cacheSize: number;
   private embeddingLookup: EmbeddingLookup | null = null;
 
   constructor(cacheSize = DEFAULT_CACHE_SIZE) {
-    this.cacheSize = cacheSize;
     this.cache = new LruCache(cacheSize);
   }
 
@@ -131,13 +129,40 @@ export class SimilarityEngine {
     }
   }
 
-  /** Full cache clear — called on provider switch. */
+  /**
+   * Empty the similarity cache. Called by the public clearCaches API
+   * (cl-spec-007 §8.9.1), the teardown orchestrator (cl-spec-015 §4.1), and
+   * the provider-switch invalidation cascade (cl-spec-005 §6.2). Keeps the
+   * LruCache instance and its current maxSize, preserving any setCacheSize
+   * call the caller made beforehand.
+   * @see cl-spec-002 §3.2, cl-spec-007 §8.9.1
+   */
   clearCache(): void {
-    this.cache = new LruCache(this.cacheSize);
+    this.cache.clear();
   }
 
   get cacheEntryCount(): number {
     return this.cache.size;
+  }
+
+  /**
+   * Resize the similarity cache at runtime. Drops least-recently-used entries
+   * on shrink. Setting size to 0 disables the cache.
+   * @returns Number of entries evicted by the resize.
+   * @see cl-spec-007 §8.9.2
+   */
+  setCacheSize(size: number): number {
+    return this.cache.resize(size);
+  }
+
+  /** Current number of cache entries — used by ContextLens.getMemoryUsage. */
+  getEntryCount(): number {
+    return this.cache.size;
+  }
+
+  /** Configured maximum entries — used by ContextLens.getMemoryUsage. */
+  getMaxEntries(): number {
+    return this.cache.maxEntries;
   }
 
   private resolveMode(hashA: number, hashB: number): SimilarityMode {
