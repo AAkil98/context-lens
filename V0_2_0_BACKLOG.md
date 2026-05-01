@@ -15,7 +15,7 @@
 | 1 | Concurrency model | **done** | `cl-spec-007` §12 (new section) + cross-refs in `cl-spec-005` §2.1, `cl-spec-006` §2.1, `cl-spec-012` Invariant 9 |
 | 2 | Instance disposal (`dispose()`) | **done** | `cl-spec-015` + Phase 6 (T1–T17) |
 | 3 | Fleet serialization | open | extend `cl-spec-012` §8–§10 |
-| 4 | OTel re-attach | open | extend `cl-spec-013` |
+| 4 | OTel re-attach | **done** | `cl-spec-013` §2.1.3 (new) + Invariants 10/11 + impl spec `I-07-otel-reattach.md` + `attach()` in `src/otel.ts` |
 | 5 | `assess@500` over budget | open | likely new `cl-spec-016` (option-b decision required) |
 | 6 | Memory release | open | amendments to `cl-spec-005`/`006`/`007`/`009` |
 | 7 | Provider resilience | **deferred** | recommended to v0.3.0 in V0_2_0_DESIGN_STRATEGY.md |
@@ -26,7 +26,7 @@
 Dependency order from V0_2_0_DESIGN_STRATEGY.md, refreshed for post-Phase-6 state:
 
 1. ~~**Gap 1 — Concurrency**~~ — **done 2026-05-01.** `cl-spec-007` §12 added; `cl-spec-005` §2.1, `cl-spec-006` §2.1, and `cl-spec-012` Invariant 9 cross-referenced. Spec-only, no code changes. 1116 tests / 39 files / typecheck clean.
-2. **Gap 4 — OTel re-attach** (builds on dispose's `detach()`/integration registry already in code)
+2. ~~**Gap 4 — OTel re-attach**~~ — **done 2026-05-01.** `cl-spec-013` §2.1.3 (new subsection) + Invariants 10 (state scope) and 11 (single-instance binding); `impl/I-07-otel-reattach.md`; `ContextLensExporter.attach()` + gauge management refactor in `src/otel.ts`; 9 unit tests + 2 integration tests. 1116 → 1127 tests / 39 → 40 files / typecheck clean.
 3. **Gap 6 — Memory release** (`clearCaches`/`setCacheSize`/`getMemoryUsage`; cache teardown symmetry with `dispose()` already exists in T8's `clear()` shims)
 4. **Gap 3 — Fleet serialization** (requires Gap 2's dispose semantics — already done)
 5. **Gap 5 — `assess@500`** (decision lock first: option a / b / c; if b is chosen, new `cl-spec-016` similarity caching spec needed and interacts with Gap 6's new cache kind)
@@ -95,26 +95,27 @@ Each block below: scope, design surface, impl surface, test surface, commit esti
 **Dependencies:** Gap 2 (done) — disposed instances reject at `fleet.snapshot()`.
 **Decisions:** preserve vs. reset pattern-state-cache (recommend preserve).
 
-### Gap 4 — OTel re-attach
+### Gap 4 — OTel re-attach — DONE (2026-05-01)
 
-**Scope:** `ContextLensExporter.detach(instance)` already lands in Phase 6's auto-disconnect path (T13, `disconnect()`). New: explicit `attach(instance)` to bind the exporter to a fresh instance after `fromSnapshot`. State scope on re-attach: counters kept (monotonic), histograms kept (distributional), gauges reset to new instance's first assess values.
+**Shipped on `feat/v0.2-hardening`** in 4 commits: spec amendment, impl spec, code, tests.
 
-**Design work** (`cl-spec-013` extension):
-- New section "Lifecycle Coordination" — explicit detach/attach semantics, state-scope contract
-- API shape: keep current `new ContextLensExporter(instance, options)` constructor; add `detach()` (already exists per Phase 6) and `attach(instance)` methods
-- Cross-ref `cl-spec-014` §3.4 (snapshot-then-dispose-then-restore continuation pattern from Phase 6) — natural use case
+**What landed:**
+- `cl-spec-013` §2.1.3 (Re-attach after detach) added as a peer to §2.1.1 (Explicit disconnect) and §2.1.2 (Auto-disconnect on instance disposal). Documents the `attach(instance)` method, preconditions, state-scope table (counters/histograms preserved, gauges reset), idempotency boundary, single-instance binding, and the snapshot-then-dispose-then-`fromSnapshot()` continuation pattern with code example. Invariants 10 (state scope) and 11 (single-instance binding) added to §6. References table gained cl-spec-014 row; cl-spec-015 row updated.
+- `impl/I-07-otel-reattach.md` — new impl spec following the I-06 format (preamble, module map, dependency direction, module specifications, test requirements, exit criteria). Decision locks recorded in §1; build-task structure walks through the field-shape changes, gauge management refactor, the new attach() body, and the cleaned-up disconnect/handleInstanceDisposal symmetry.
+- `src/otel.ts` — gauge management refactored from `gaugeCleanup: { gauge, callback }[]` (cleared on disconnect) to `gauges: { gauge, getValue, currentCallback }[]` (preserved across cycles, callback toggles via `attachGaugeCallbacks`/`detachGaugeCallbacks`). `instance` and `integrationHandle` fields are now nullable. `disconnect()` and `handleInstanceDisposal` symmetric — both null both fields and call the new helpers. `commonAttributes` gained a defensive null guard. `subscribeAll` takes the instance as an explicit parameter so handler closures don't capture the nullable field. New `attach(instance)` method: handshake-first (only fallible step), then commit; resets gauge state via `resetGaugeState()`.
+- 9 unit tests in `test/unit/otel.test.ts` (new "Re-attach (cl-spec-013 §2.1.3)" describe block) + 2 integration tests in new `test/integration/otel-reattach.test.ts`. Mock semantics adjusted so `addCallback` clears the `removed` flag (mirrors real OTel re-arm behavior). All existing 30 OTel unit tests pass unchanged.
+- Pitfall: `assess()` reuses a cached report when no mutation has happened since the previous assess, and `reportGenerated` fires only on cache miss. Tests interleave a mutation between every assess (same pattern existing tests use) and the contract is documented inline.
 
-**Impl work** (`otel.ts`):
-- New `attach(instance)` method on `ContextLensExporter`
-- Validate state: `attach` only valid on a detached exporter (after `disconnect()` or `handleInstanceDisposal`); throws otherwise
-- Re-subscribe to instance events; re-call `instance.attachIntegration(...)` for the new instance's lifecycle hook
-- Internal-state preservation: reset gauge "stored" values to defaults so first reportGenerated repopulates
+**Decision locks applied (per user thumbs-up 2026-05-01):**
+- Mutable binding API. The exporter starts attached, may detach, may re-attach. No factory-once pattern.
+- No multi-instance fan-in. `attach()` on a still-connected exporter throws — `disconnect()` is the only retarget path.
+- State scope: counters preserved (OTel monotonic contract), histogram preserved (distributional), gauges reset to construction-time defaults (point-in-time semantics).
 
-**Test work:** ~6–8 unit + 1 integration case (snapshot → dispose → fromSnapshot → attach → continue metric stream; counter monotonicity preserved across re-attach).
+**Test count:** 1116 → 1127 (+9 unit + 2 integration). Test files: 39 → 40. Typecheck clean. Benches green.
 
-**Commits:** 1 spec amendment, 1 impl-spec, ~3–4 build tasks.
-**Dependencies:** Gap 2 (done).
-**Decisions:** binding API shape (mutable), multi-instance fan-in (no), state scope on re-attach (counters/histograms keep, gauges reset).
+**Original scope** (kept here for historical reference):
+
+> `ContextLensExporter.detach(instance)` already lands in Phase 6's auto-disconnect path. New: explicit `attach(instance)` to bind the exporter to a fresh instance after `fromSnapshot`. State scope on re-attach: counters kept (monotonic), histograms kept (distributional), gauges reset to new instance's first assess values.
 
 ### Gap 5 — `assess@500` budget
 
@@ -197,17 +198,19 @@ Per V0_2_0_DESIGN_STRATEGY.md "Non-goals":
 
 ## Total scope estimate
 
-If all six remaining gaps land in v0.2.0:
+Remaining after Gaps 1 and 4 shipped (2026-05-01):
 
 | Surface | Count |
 |---------|------:|
 | Design specs (new) | 0–1 (cl-spec-016 if Gap 5 option b) |
-| Design specs (amended) | 5 (cl-spec-005, 006, 007, 009, 012, 013, 014) |
-| Impl specs (new) | 4 (one per Gap 3, 4, 5, 6 — Gaps 1 and 8 are spec-only) |
-| Build tasks | ~25–35 across the four impl specs |
-| New unit + integration tests | ~50–80 cases |
+| Design specs (amended) | 4 remaining (cl-spec-005/006/007/009 for Gap 6; cl-spec-009 for Gap 8; cl-spec-012/014 for Gap 3; cl-spec-002/009 for Gap 5) |
+| Impl specs (new) | 3 remaining (Gap 3, Gap 5, Gap 6 — Gap 8 is spec-only) |
+| Build tasks | ~17–25 across the three remaining impl specs |
+| New unit + integration tests | ~30–55 cases |
 | New benchmarks | 1–2 (for Gap 5 cache-warm vs. cache-cold) |
-| Net commits on `feat/v0.2-hardening` | ~40–55 |
+| Net remaining commits on `feat/v0.2-hardening` | ~25–35 |
+
+Done so far on `feat/v0.2-hardening`: 6 commits (Gap 1: 1, Gap 4: 4 + tracking sync from prior turn). Tests grew from 1116 (Phase 6 exit) to 1127 (current).
 
 **Risk-weighted "ship dispose alone as v0.2.0, defer the rest to v0.2.1+v0.3.0" alternative:** still on the table per `SHIPPING.md` revision. The user picked option (2) — bundle — so this plan continues forward.
 
@@ -215,9 +218,9 @@ If all six remaining gaps land in v0.2.0:
 
 ## Recommended next action
 
-**Confirm the decision locks above (especially Gap 5 a/b/c — it's the only one without a default that closes the spec scope).** Once confirmed, the first commit on this branch is the Gap 1 concurrency amendment to `cl-spec-007` — smallest blast radius, no dependencies, exercises the new spec-amendment cadence on the new branch.
+**Gap 6 — Memory release.** With the dispose-time `clear()` shims already in place from Phase 6, the surface delta is small: new `clearCaches(kind?)`, `setCacheSize(kind, size)`, `getMemoryUsage()` methods on `ContextLens`; `cachesCleared` event (catalog 25 → 26); spec amendments to `cl-spec-005`/`006`/`007`/`009`. ~5–7 build tasks per the original plan.
 
-After Gap 1 lands, sequence: Gap 4 → Gap 6 → Gap 3 → Gap 5 → Gap 8.
+Remaining sequence: Gap 6 → Gap 3 → Gap 5 → Gap 8.
 
 ---
 
