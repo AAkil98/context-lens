@@ -11,8 +11,21 @@ import { fnv1a } from '../utils/hash.js';
 // ─── Constants ────────────────────────────────────────────────────
 
 const SAMPLING_THRESHOLD = 200;
-const UNCACHED_SAMPLE_CAP = 30;
 const REDUNDANCY_ANNOTATION_THRESHOLD = 0.5;
+
+/**
+ * Adaptive per-segment cap on the number of non-adjacent comparisons sampled
+ * during cold-start density scoring. The step function tightens the cap as n
+ * grows past 300, keeping the per-`assess()` cost bounded while preserving the
+ * v0.1.0 baseline at smaller windows.
+ *
+ * @see cl-spec-016 §3.1
+ */
+function densitySampleCap(n: number): number {
+  if (n <= 300) return 30;
+  if (n <= 500) return 15;
+  return 10;
+}
 
 // ─── Input / Output Types ─────────────────────────────────────────
 
@@ -74,6 +87,10 @@ export function computeDensity(
   }
 
   const useSampling = n > SAMPLING_THRESHOLD;
+  // Adaptive per-segment sample cap (cl-spec-016 §3.1). Tighter at higher n
+  // to keep the per-`assess()` work bounded; the same prefix-of-shuffle
+  // semantics preserve cache-warm/cache-cold determinism.
+  const sampleCap = densitySampleCap(n);
   let rng: (() => number) | null = null;
   if (useSampling) {
     const sortedIds = ordered.map(s => s.id).sort();
@@ -111,19 +128,19 @@ export function computeDensity(
     if (maxRedundancy < 1.0 && nonAdj.length > 0) {
       let indicesToCheck: number[];
 
-      if (!useSampling || nonAdj.length <= UNCACHED_SAMPLE_CAP) {
+      if (!useSampling || nonAdj.length <= sampleCap) {
         indicesToCheck = nonAdj;
       } else {
         // Cached-first sampling: check all, but limit uncached computations
         // We pass all indices through — the similarity cache handles hits cheaply.
-        // For truly cold-start, we cap uncached comparisons at UNCACHED_SAMPLE_CAP.
+        // For truly cold-start, we cap uncached comparisons at sampleCap.
         // Shuffle non-adjacent indices deterministically and take a prefix.
         const shuffled = [...nonAdj];
-        for (let k = 0; k < Math.min(UNCACHED_SAMPLE_CAP, shuffled.length); k++) {
+        for (let k = 0; k < Math.min(sampleCap, shuffled.length); k++) {
           const j = k + Math.floor(rng!() * (shuffled.length - k));
           [shuffled[k], shuffled[j]] = [shuffled[j]!, shuffled[k]!];
         }
-        indicesToCheck = shuffled.slice(0, UNCACHED_SAMPLE_CAP);
+        indicesToCheck = shuffled.slice(0, sampleCap);
       }
 
       for (const j of indicesToCheck) {

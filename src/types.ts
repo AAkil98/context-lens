@@ -623,6 +623,13 @@ export interface SerializedConfig {
   hysteresisMargin: number;
   tokenCacheSize: number;
   embeddingCacheSize: number;
+  /**
+   * Maximum entries in the similarity cache at snapshot time (cl-spec-016 §5.4).
+   * Optional for forward-compat with snapshots from v0.1.0 and early v0.2.0
+   * that predate cl-spec-016 — `fromSnapshot` falls back to the default
+   * formula when the field is absent.
+   */
+  similarityCacheSize?: number;
 }
 
 export interface ProviderMetadataSnapshot {

@@ -65,6 +65,13 @@ export interface ContextLensConfig {
   hysteresisMargin?: number;
   tokenCacheSize?: number;
   embeddingCacheSize?: number;
+  /**
+   * Maximum entries in the pairwise similarity cache. Defaults to a value
+   * scaled with `capacity` per cl-spec-016 §2.1 — clamped to [16384, 65536].
+   * Set to 0 to disable the cache (cl-spec-007 §8.9.2 + cl-spec-016 §5.1).
+   * Runtime resize via `setCacheSize('similarity', N)` (cl-spec-007 §8.9.2).
+   */
+  similarityCacheSize?: number;
   customPatterns?: PatternDefinition[];
 }
 
@@ -82,6 +89,18 @@ export interface SeedInput {
 
 /** Process-wide monotonic counter for {@link ContextLens.instanceId}. @see cl-spec-015 §2.5 */
 let INSTANCE_COUNTER = 0;
+
+/**
+ * Default similarity cache size scaled with capacity per cl-spec-016 §2.1.
+ * Clamped to [16384, 65536] — lower bound preserves v0.1.0 behavior at small
+ * capacities; upper bound caps memory footprint at ~5.2 MB (80 bytes/entry).
+ *
+ * @see cl-spec-016 §2.1
+ */
+function defaultSimilarityCacheSize(capacity: number): number {
+  const computed = Math.ceil(Math.sqrt(capacity / 200) * 16384);
+  return Math.max(16384, Math.min(65536, computed));
+}
 
 /**
  * Valid CacheKind values for {@link ContextLens.clearCaches}. Includes 'all'.
@@ -186,8 +205,9 @@ export class ContextLens {
       (content: string) => this.tokenizer.count(content),
     );
 
-    // Step 9: Create similarity engine
-    this.similarity = new SimilarityEngine();
+    // Step 9: Create similarity engine — sized per cl-spec-016 §2.1
+    const similarityCacheSize = config.similarityCacheSize ?? defaultSimilarityCacheSize(config.capacity);
+    this.similarity = new SimilarityEngine(similarityCacheSize);
     this.similarity.setEmbeddingLookup(this.embedding);
 
     // Step 10: Create task manager
@@ -261,6 +281,15 @@ export class ContextLens {
     if (config.embeddingCacheSize !== undefined) {
       if (!Number.isInteger(config.embeddingCacheSize) || config.embeddingCacheSize <= 0) {
         throw new ConfigurationError('embeddingCacheSize must be a positive integer', { embeddingCacheSize: config.embeddingCacheSize });
+      }
+    }
+
+    if (config.similarityCacheSize !== undefined) {
+      if (!Number.isInteger(config.similarityCacheSize) || config.similarityCacheSize < 0) {
+        throw new ConfigurationError(
+          'similarityCacheSize must be a non-negative integer',
+          { similarityCacheSize: config.similarityCacheSize },
+        );
       }
     }
 
@@ -1210,6 +1239,7 @@ export class ContextLens {
       hysteresisMargin: this.configSnapshot.hysteresisMargin ?? 0.03,
       tokenCacheSize: this.configSnapshot.tokenCacheSize ?? 4096,
       embeddingCacheSize: this.configSnapshot.embeddingCacheSize ?? 4096,
+      similarityCacheSize: this.similarity.getMaxEntries(),
     };
 
     // Provider metadata
@@ -1302,6 +1332,10 @@ export class ContextLens {
       tokenCacheSize: state.config.tokenCacheSize,
       embeddingCacheSize: state.config.embeddingCacheSize,
     };
+    if (state.config.similarityCacheSize !== undefined) {
+      mergedConfig.similarityCacheSize = state.config.similarityCacheSize;
+    }
+    // Else: omitted — constructor falls back to defaultSimilarityCacheSize(capacity).
     if (restoreConfig?.embeddingProvider !== undefined) {
       mergedConfig.embeddingProvider = restoreConfig.embeddingProvider;
     }
