@@ -14,7 +14,7 @@
 |---|-----|--------|-------|
 | 1 | Concurrency model | **done** | `cl-spec-007` §12 (new section) + cross-refs in `cl-spec-005` §2.1, `cl-spec-006` §2.1, `cl-spec-012` Invariant 9 |
 | 2 | Instance disposal (`dispose()`) | **done** | `cl-spec-015` + Phase 6 (T1–T17) |
-| 3 | Fleet serialization | open | extend `cl-spec-012` §8–§10 |
+| 3 | Fleet serialization | **done** | `cl-spec-012` §8 (new) + Invariants 10–12 + cl-spec-014 §5 amendment + impl spec `I-09-fleet-serialization.md` + `snapshot()` / `fromSnapshot()` in `src/fleet.ts` |
 | 4 | OTel re-attach | **done** | `cl-spec-013` §2.1.3 (new) + Invariants 10/11 + impl spec `I-07-otel-reattach.md` + `attach()` in `src/otel.ts` |
 | 5 | `assess@500` over budget | open | likely new `cl-spec-016` (option-b decision required) |
 | 6 | Memory release | **done** | `cl-spec-007` §8.9 (new) + `cachesCleared` event + impl spec `I-08-memory-release.md` + LruCache.resize + `clearCaches`/`setCacheSize`/`getMemoryUsage` |
@@ -28,7 +28,7 @@ Dependency order from V0_2_0_DESIGN_STRATEGY.md, refreshed for post-Phase-6 stat
 1. ~~**Gap 1 — Concurrency**~~ — **done 2026-05-01.** `cl-spec-007` §12 added; `cl-spec-005` §2.1, `cl-spec-006` §2.1, and `cl-spec-012` Invariant 9 cross-referenced. Spec-only, no code changes. 1116 tests / 39 files / typecheck clean.
 2. ~~**Gap 4 — OTel re-attach**~~ — **done 2026-05-01.** `cl-spec-013` §2.1.3 (new subsection) + Invariants 10 (state scope) and 11 (single-instance binding); `impl/I-07-otel-reattach.md`; `ContextLensExporter.attach()` + gauge management refactor in `src/otel.ts`; 9 unit tests + 2 integration tests. 1116 → 1127 tests / 39 → 40 files / typecheck clean.
 3. ~~**Gap 6 — Memory release**~~ — **done 2026-05-01.** `cl-spec-007` §8.9 (new section: clearCaches/setCacheSize/getMemoryUsage) + `cachesCleared` event (catalog 25 → 26) + cross-refs in `cl-spec-005` §5.5, `cl-spec-006` §5.6, `cl-spec-009` §6.5; `impl/I-08-memory-release.md`; `LruCache.resize` + per-cache setCacheSize/getEntryCount/getMaxEntries hooks (embedding adds getEntryByteEstimate); 39 new tests (38 unit + 1 integration). 1128 → 1167 tests / 40 files / typecheck clean.
-4. **Gap 3 — Fleet serialization** (requires Gap 2's dispose semantics — already done)
+4. ~~**Gap 3 — Fleet serialization**~~ — **done 2026-05-02.** `cl-spec-012` §8 (new section: 8.1 Snapshot, 8.2 Restore, 8.3 Format Versioning) + Invariants 10–12; `cl-spec-014` §5 amendment acknowledging fleet wrapping; `impl/I-09-fleet-serialization.md`; `ContextLensFleet.snapshot()` + `static fromSnapshot()` in `src/fleet.ts`; 13 unit + 3 integration tests. 1167 → 1184 tests / 40 → 41 files / typecheck clean.
 5. **Gap 5 — `assess@500`** (decision lock first: option a / b / c; if b is chosen, new `cl-spec-016` similarity caching spec needed and interacts with Gap 6's new cache kind)
 6. **Gap 8 — Runtime compatibility statement** (one paragraph; can land any time, ordered last because it depends on the v0.2.0 surface being settled)
 
@@ -73,27 +73,24 @@ Each block below: scope, design surface, impl surface, test surface, commit esti
 
 > Promote the buried single-threaded paragraph in `cl-spec-007` §11 to a dedicated section. Enumerate undefined-behavior zones (overlapping mutations, concurrent `assess()`, overlapping provider calls, re-entrant handlers). Document safe patterns (mutex, actor queue, one-instance-per-worker). State the unsupported scope (`SharedArrayBuffer`, multi-thread shared instance). Add fleet derivation: `assessFleet` is sequential.
 
-### Gap 3 — Fleet serialization
+### Gap 3 — Fleet serialization — DONE (2026-05-02)
 
-**Scope:** `ContextLensFleet.snapshot()` / `fromSnapshot()`. Self-contained inline format embedding instance snapshots. Preserves the fleet's pattern-state cache for event-diffing continuity across restore.
+**Shipped on `feat/v0.2-hardening`** in 4 commits: spec amendments, impl spec, code, tests.
 
-**Design work** (`cl-spec-012` extensions + `cl-spec-014` amendment):
-- New §8 Fleet Snapshot — `SerializedFleet` shape, format version, includeContent propagation
-- New §9 Fleet Restore — `FleetRestoreConfig` with per-label `RestoreConfig` map + default
-- New §10 Fleet Format Versioning — independent of instance + schema versions
-- `cl-spec-014` §5 amendment: fleet snapshots embed instance snapshots verbatim
-- `cl-spec-014` §8 + `cl-spec-012` §8: drop "Fleet state is not serializable", replace with positive contract
+**What landed:**
+- `cl-spec-012` §8 Fleet Serialization (new top-level section between §7 Instance Disposal Handling and the renumbered §9 Invariants). Three subsections: 8.1 Snapshot (the snapshot method, pattern-state-cache preservation, SerializedFleet shape), 8.2 Restore (fromSnapshot factory, FleetRestoreConfig with default + perLabel), 8.3 Format Versioning (independent of cl-spec-014's per-instance formatVersion and cl-spec-011's schema version). New Invariants 10 (pattern-state continuity), 11 (atomicity), 12 (version independence). Renumbered §8 Invariants → §9, §9 References → §10. Replaced the "Serialization. Fleet state is not serializable..." pseudo-paragraph with cross-refs to §8.
+- `cl-spec-014` §5 amendment acknowledging the fleet wrapping path. The "External integrations" paragraph dropped "fleet registrations" from the not-serialized list since they ARE serialized by the fleet wrapper. References table gained a cl-spec-012 row.
+- `impl/I-09-fleet-serialization.md` — full build plan in the I-06/I-07/I-08 format.
+- `src/fleet.ts` — new FLEET_FORMAT_VERSION constant; FleetRestoreConfig interface; `snapshot(options?)` instance method (iterates registered instances in order, surfaces DisposedError verbatim per Invariant 11, captures per-instance trackingState and global fleetState); `static fromSnapshot(state, config)` factory (six-step orchestration with format-version validation, label uniqueness check, ContextLens.fromSnapshot per instance with perLabel|default RestoreConfig dispatch, register, rehydrate trackingState, restore fleetDegradedState; inner failures decorated with offending label).
+- `src/types.ts` — six new types (FleetTrackingState, FleetState, SerializedFleetInstance, SerializedFleet, FleetSnapshotOptions, plus FleetRestoreConfig in fleet.ts to avoid restructuring types around RestoreConfig).
+- 16 new tests (13 unit + 3 integration). Test floor 1167 → 1184. Decision lock applied: pattern-state cache preserved across restore, not reset. The first `assessFleet()` after restore is silent on the event channel for any pattern set matching the snapshot's last-known state.
 
-**Impl work** (~3 modules touched):
-- `fleet.ts` — add `snapshot()` and static `fromSnapshot()`
-- `serialization.ts` — extend with fleet helpers (or fleet has its own format)
-- `schemas/` — JSON Schema for `SerializedFleet`
+**Decision locks applied (per user thumbs-up 2026-05-01):**
+- Pattern-state cache preservation: yes. The fleet's per-instance diff state (`activePatterns`, `patternActivatedAt`, `lastAssessedAt`) and global `fleetDegradedState` flag are serialized and rehydrated on `fromSnapshot`. Callers wanting the fresh-fleet behavior can simply skip `fromSnapshot` and register manually.
 
-**Test work:** ~10 unit + ~3 integration cases (round-trip, includeContent variants, disposed-instance rejection at snapshot, label-collision behavior, pattern-state-cache preservation across restore).
+**Original scope** (kept here for historical reference):
 
-**Commits:** 1 design (spec amendments bundled), 1 impl-spec, ~4–6 build tasks.
-**Dependencies:** Gap 2 (done) — disposed instances reject at `fleet.snapshot()`.
-**Decisions:** preserve vs. reset pattern-state-cache (recommend preserve).
+> `ContextLensFleet.snapshot()` / `fromSnapshot()`. Self-contained inline format embedding instance snapshots. Preserves the fleet's pattern-state cache for event-diffing continuity across restore.
 
 ### Gap 4 — OTel re-attach — DONE (2026-05-01)
 
@@ -204,19 +201,19 @@ Per V0_2_0_DESIGN_STRATEGY.md "Non-goals":
 
 ## Total scope estimate
 
-Remaining after Gaps 1, 4, and 6 shipped (2026-05-01):
+Remaining after Gaps 1, 3, 4, and 6 shipped (2026-05-01 / 02):
 
 | Surface | Count |
 |---------|------:|
 | Design specs (new) | 0–1 (cl-spec-016 if Gap 5 option b) |
-| Design specs (amended) | 3 remaining (cl-spec-009 for Gap 8; cl-spec-012/014 for Gap 3; cl-spec-002/009 for Gap 5) |
-| Impl specs (new) | 2 remaining (Gap 3, Gap 5 — Gap 8 is spec-only) |
-| Build tasks | ~10–17 across the two remaining impl specs |
-| New unit + integration tests | ~20–40 cases |
+| Design specs (amended) | 2 remaining (cl-spec-009 for Gap 8; cl-spec-002/009 for Gap 5) |
+| Impl specs (new) | 1 remaining (Gap 5 — Gap 8 is spec-only) |
+| Build tasks | ~5–8 across the remaining impl spec |
+| New unit + integration tests | ~10–20 cases |
 | New benchmarks | 1–2 (for Gap 5 cache-warm vs. cache-cold) |
-| Net remaining commits on `feat/v0.2-hardening` | ~17–25 |
+| Net remaining commits on `feat/v0.2-hardening` | ~10–15 |
 
-Done so far on `feat/v0.2-hardening`: ~12 commits (Gap 1: 1, Gap 4: 5, Gap 6: 4 + tracking sync). Tests grew from 1116 (Phase 6 exit) to 1167 (current).
+Done so far on `feat/v0.2-hardening`: ~16 commits (Gap 1: 1, Gap 4: 5, Gap 6: 4, Gap 3: 4 + tracking syncs). Tests grew from 1116 (Phase 6 exit) to 1184 (current).
 
 **Risk-weighted "ship dispose alone as v0.2.0, defer the rest to v0.2.1+v0.3.0" alternative:** still on the table per `SHIPPING.md` revision. The user picked option (2) — bundle — so this plan continues forward.
 
@@ -224,9 +221,9 @@ Done so far on `feat/v0.2-hardening`: ~12 commits (Gap 1: 1, Gap 4: 5, Gap 6: 4 
 
 ## Recommended next action
 
-**Gap 3 — Fleet serialization.** `ContextLensFleet.snapshot()` and `static fromSnapshot()` per the backlog's earlier scoping. Self-contained inline format embedding instance snapshots; preserves the fleet's pattern-state cache for event-diffing continuity across restore. ~3 spec amendments + 1 impl spec + ~4–6 build tasks. Now unblocked since Gap 2 (dispose) is done — disposed instances should reject at `fleet.snapshot()` per the spec.
+**Gap 5 — `assess@500` over budget.** Decision lock already applied (option (b) incremental similarity cache, with (a) tighter sampling as fallback above N). New `cl-spec-016 Similarity Caching & Sampling` coordinating spec spans cl-spec-002/005/009; amendments to those three specs to reflect the new caching contract; impl spec; ~5–7 build tasks adding pairwise-cache invalidation hooks and a `similarityCacheSize` constructor option. Property test required: `assess()` output identical across cache-warm and cache-cold states.
 
-Remaining sequence: Gap 3 → Gap 5 → Gap 8.
+Remaining sequence: Gap 5 → Gap 8.
 
 ---
 
