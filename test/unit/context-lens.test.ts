@@ -1692,3 +1692,84 @@ describe('Memory management', () => {
     expect(usageAfterAssess.similarity.entries).toBeGreaterThan(0);
   });
 });
+
+// ─── similarityCacheSize config (cl-spec-016, Gap 5) ──────────────
+
+describe('similarityCacheSize config', () => {
+  it('default scales with capacity, clamped to [16384, 65536]', () => {
+    // Lower bound — at capacity < 200, formula computes < 16384, clamped up
+    const tiny = new ContextLens({ capacity: 100 });
+    expect(tiny.getMemoryUsage().similarity.maxEntries).toBe(16384);
+
+    // Right at the formula's natural lower bound — sqrt(200/200) × 16384 = 16384
+    const minimum = new ContextLens({ capacity: 200 });
+    expect(minimum.getMemoryUsage().similarity.maxEntries).toBe(16384);
+
+    // Mid-range — formula computes between bounds
+    // sqrt(800/200) × 16384 = 2 × 16384 = 32768 (within bounds)
+    const mid = new ContextLens({ capacity: 800 });
+    expect(mid.getMemoryUsage().similarity.maxEntries).toBe(32768);
+
+    // Upper bound at typical large capacity
+    const large = new ContextLens({ capacity: 128000 });
+    expect(large.getMemoryUsage().similarity.maxEntries).toBe(65536);
+
+    // Upper bound at huge capacity
+    const huge = new ContextLens({ capacity: 1000000 });
+    expect(huge.getMemoryUsage().similarity.maxEntries).toBe(65536);
+  });
+
+  it('explicit similarityCacheSize overrides the default', () => {
+    const lens = new ContextLens({ capacity: 128000, similarityCacheSize: 4096 });
+    expect(lens.getMemoryUsage().similarity.maxEntries).toBe(4096);
+  });
+
+  it('similarityCacheSize: 0 disables the cache', () => {
+    const lens = new ContextLens({ capacity: 100000, similarityCacheSize: 0 });
+    expect(lens.getMemoryUsage().similarity.maxEntries).toBe(0);
+
+    // Subsequent operations work but every similarity lookup misses.
+    lens.add('one segment');
+    lens.add('another segment with different content');
+    lens.assess();
+    expect(lens.getMemoryUsage().similarity.entries).toBe(0);
+  });
+
+  it('rejects negative similarityCacheSize with ConfigurationError', () => {
+    expect(() => new ContextLens({ capacity: 1000, similarityCacheSize: -1 }))
+      .toThrow(ConfigurationError);
+  });
+
+  it('rejects non-integer similarityCacheSize with ConfigurationError', () => {
+    expect(() => new ContextLens({ capacity: 1000, similarityCacheSize: 1.5 }))
+      .toThrow(ConfigurationError);
+  });
+
+  it('rejects NaN similarityCacheSize with ConfigurationError', () => {
+    expect(() => new ContextLens({ capacity: 1000, similarityCacheSize: Number.NaN }))
+      .toThrow(ConfigurationError);
+  });
+
+  it('snapshot captures similarityCacheSize; fromSnapshot honors it', () => {
+    const a = new ContextLens({ capacity: 50000, similarityCacheSize: 8192 });
+    a.add('content one for the fresh window');
+    a.add('content two for the fresh window');
+    const state = a.snapshot();
+    expect(state.config.similarityCacheSize).toBe(8192);
+
+    const b = ContextLens.fromSnapshot(state, {});
+    expect(b.getMemoryUsage().similarity.maxEntries).toBe(8192);
+  });
+
+  it('fromSnapshot falls back to default when similarityCacheSize is absent (forward-compat)', () => {
+    const a = new ContextLens({ capacity: 128000 });
+    a.add('seed content');
+    const state = a.snapshot();
+    // Simulate an older snapshot by deleting the field.
+    delete (state.config as { similarityCacheSize?: number }).similarityCacheSize;
+
+    const b = ContextLens.fromSnapshot(state, {});
+    // Defaults to upper bound at capacity=128000.
+    expect(b.getMemoryUsage().similarity.maxEntries).toBe(65536);
+  });
+});

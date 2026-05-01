@@ -19,9 +19,11 @@ const REDUNDANCY_ANNOTATION_THRESHOLD = 0.5;
  * grows past 300, keeping the per-`assess()` cost bounded while preserving the
  * v0.1.0 baseline at smaller windows.
  *
+ * Exported for unit testing the threshold boundaries.
+ *
  * @see cl-spec-016 §3.1
  */
-function densitySampleCap(n: number): number {
+export function densitySampleCap(n: number): number {
   if (n <= 300) return 30;
   if (n <= 500) return 15;
   return 10;

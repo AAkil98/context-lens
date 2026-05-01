@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   computeDensity,
+  densitySampleCap,
   type DensitySegment,
 } from '../../../src/scoring/density.js';
 import { SimilarityEngine } from '../../../src/similarity.js';
@@ -255,6 +256,38 @@ describe('computeDensity', () => {
       const d2 = result.perSegment.get('s2')!.density;
       const expected = (d1 * 50 + d2 * 100) / 150;
       expect(result.windowDensity).toBeCloseTo(expected, 10);
+    });
+  });
+
+  // ── Adaptive sampling (cl-spec-016 §3.1) ──────────────────────
+
+  describe('densitySampleCap step function', () => {
+    it('returns 30 at and below n=300', () => {
+      expect(densitySampleCap(0)).toBe(30);
+      expect(densitySampleCap(1)).toBe(30);
+      expect(densitySampleCap(200)).toBe(30);
+      expect(densitySampleCap(300)).toBe(30);
+    });
+
+    it('returns 15 between n=301 and n=500', () => {
+      expect(densitySampleCap(301)).toBe(15);
+      expect(densitySampleCap(400)).toBe(15);
+      expect(densitySampleCap(500)).toBe(15);
+    });
+
+    it('returns 10 above n=500', () => {
+      expect(densitySampleCap(501)).toBe(10);
+      expect(densitySampleCap(1000)).toBe(10);
+      expect(densitySampleCap(10000)).toBe(10);
+    });
+
+    it('is monotonically non-increasing in n (Invariant 6)', () => {
+      let prev = densitySampleCap(0);
+      for (let n = 0; n <= 1000; n += 50) {
+        const cur = densitySampleCap(n);
+        expect(cur).toBeLessThanOrEqual(prev);
+        prev = cur;
+      }
     });
   });
 });
