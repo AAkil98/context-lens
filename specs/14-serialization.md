@@ -4,7 +4,7 @@ title: Serialization
 type: design
 status: complete
 created: 2026-04-04
-revised: 2026-04-29
+revised: 2026-05-02
 authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
 tags: [serialization, snapshot, restore, persistence, replay, export, state, lifecycle]
 depends_on: [cl-spec-007, cl-spec-011, cl-spec-015]
@@ -362,7 +362,9 @@ After restore, the instance is fully functional:
 - **`getDiagnostics()`** returns a snapshot that includes both pre-restore history (from the snapshot) and post-restore activity.
 - **`getDiagnostics().latestReport`** is null until the first `assess()` call, even if the original instance had generated reports. Quality reports are not serialized — they are recomputed on demand.
 
-**External integrations.** Event handlers, fleet registrations, and OTel exporter subscriptions are not serialized or restored. Callers must re-attach these after `fromSnapshot()`. The restored instance's event system starts with no subscribers. This is the same boundary that `dispose()` enforces (cl-spec-015 §5.4) — integration attachments are caller-managed across both the snapshot/restore and dispose lifecycles.
+**External integrations.** Event handlers and OTel exporter subscriptions are not serialized or restored. Callers must re-attach these after `fromSnapshot()`. The restored instance's event system starts with no subscribers. This is the same boundary that `dispose()` enforces (cl-spec-015 §5.4) — integration attachments are caller-managed across both the snapshot/restore and dispose lifecycles.
+
+Fleet registrations are a special case: an instance restored via `ContextLens.fromSnapshot` has no fleet membership, but the parent fleet may be restored via `ContextLensFleet.fromSnapshot` (cl-spec-012 §8), which wraps `ContextLens.fromSnapshot` for every member instance and re-establishes both the registration and the lifecycle integration handshake atomically. From the per-instance spec's perspective, this is still a fresh `fromSnapshot` plus a fresh `fleet.register` — the wrapper does not change the instance-level contract.
 
 **Lifecycle state.** The restored instance is **live**: `isDisposed === false`, `isDisposing === false` (cl-spec-015 §2.5). The fact that the snapshot was captured on a different instance — possibly one that has since been disposed — does not propagate to the restored instance. Each `fromSnapshot()` produces a fresh instance with a fresh `instanceId` (the identifier carried by `stateDisposed` events and `DisposedError` messages); the disposed source's identifier is not carried over. Callers correlating sessions across snapshots must do so via their own labels, not via library-internal identifiers.
 
@@ -476,6 +478,7 @@ The reference implementation maintains a deserializer for each published format 
 | `cl-spec-007` (API Surface) | Defines `snapshot()` and `fromSnapshot()` as API methods. Defines constructor config restored from snapshot. The lifecycle methods (`dispose`, `isDisposed`, `isDisposing`) and `DisposedError` interact with this spec via the read-only-during-disposal rule (Invariant 9) and the snapshot-then-dispose continuation pattern (section 3.4). |
 | `cl-spec-010` (Report & Diagnostics) | Defines report history, pattern history, timeline, performance metrics, warnings — all serialized. |
 | `cl-spec-011` (Report Schema) | Defines schema versioning conventions followed by the snapshot format. Shared type definitions referenced by the snapshot structure. |
+| `cl-spec-012` (Fleet Monitor) | Section 8 (Fleet Serialization) wraps this spec's per-instance `snapshot()` / `fromSnapshot()` contract — a `SerializedFleet` embeds one `SerializedState` per registered instance verbatim. The fleet's `formatVersion` is independent of this spec's per-instance `formatVersion` (cl-spec-012 Invariant 12). |
 | `cl-spec-015` (Instance Lifecycle) | Defines `dispose()` and the terminal state. Section 3.4 of this spec specifies the snapshot-then-dispose-then-fromSnapshot continuation pattern as the only state-preserving path across disposal. cl-spec-015 §5.4 enumerates the same pattern from the lifecycle perspective. |
 
 ---

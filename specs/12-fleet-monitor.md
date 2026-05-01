@@ -4,10 +4,10 @@ title: Fleet Monitor
 type: design
 status: complete
 created: 2026-04-04
-revised: 2026-05-01
+revised: 2026-05-02
 authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
-tags: [fleet, multi-instance, aggregation, monitoring, multi-agent, orchestration, lifecycle, concurrency]
-depends_on: [cl-spec-007, cl-spec-011, cl-spec-015]
+tags: [fleet, multi-instance, aggregation, monitoring, multi-agent, orchestration, lifecycle, concurrency, serialization]
+depends_on: [cl-spec-007, cl-spec-011, cl-spec-014, cl-spec-015]
 ---
 
 # Fleet Monitor
@@ -21,8 +21,9 @@ depends_on: [cl-spec-007, cl-spec-011, cl-spec-015]
 5. Fleet Report
 6. Fleet Events
 7. Instance Disposal Handling
-8. Invariants and Constraints
-9. References
+8. Fleet Serialization
+9. Invariants and Constraints
+10. References
 
 ---
 
@@ -342,7 +343,115 @@ If the caller has not registered fleet events and instead detects "missing" inst
 
 ---
 
-## 8. Invariants and Constraints
+## 8. Fleet Serialization
+
+A `ContextLensFleet` can be serialized to a self-contained snapshot and restored on a new fleet instance. This complements the per-instance `snapshot()` / `fromSnapshot()` pattern (cl-spec-014) by capturing fleet-level state — registration order, fleet options, and the per-instance pattern-state cache used for event diffing — alongside the embedded instance snapshots. The motivating use case is the same as for instance serialization: persist the working state of an entire monitored deployment, then continue from that state on a fresh process or after an instance dispose / restore cycle.
+
+This section supersedes the v0.1.0 carve-out that "fleet state is not serializable" (formerly carried in §9 as a paragraph). With Gap 6 of v0.2.0 hardening shipped, fleet state has a concrete positive contract.
+
+### 8.1 Snapshot
+
+```
+fleet.snapshot(options?: { includeContent?: boolean }) → SerializedFleet
+```
+
+Produces a fleet-level snapshot. The `includeContent` option propagates to every embedded instance snapshot per cl-spec-014 §6 — full snapshots (`includeContent: true`, the default) are restorable; lightweight snapshots (`includeContent: false`) capture metadata and history but not segment content, are ~10× smaller, and are not restorable.
+
+**Behavior:**
+
+1. Iterate every registered instance in registration order. Calling each instance's `snapshot(options)` produces a `SerializedState` (cl-spec-014 §4). The fleet does not modify the snapshot — it embeds the result verbatim.
+2. Capture fleet-level state: construction-time options, the `fleetDegradedState` flag, and per-instance pattern tracking state (active pattern names, activation timestamps, last-assessed-at). This is the data the fleet uses to detect transitions on the next `assessFleet()`; preserving it across a restore prevents spurious `instanceDegraded` events for already-active patterns (Invariant 9, "pattern-state continuity").
+3. Wrap the embedded snapshots and fleet-level state into a `SerializedFleet` object (section 8.1.2).
+4. Return the wrapper.
+
+**Throws:** `DisposedError` if any registered instance is in the disposed state at the time of capture. The fleet calls `instance.snapshot()` per instance; cl-spec-014 §3 specifies that the instance's `snapshot()` throws `DisposedError` post-disposal. The fleet does not catch this error — fleet snapshot is all-or-nothing. Callers needing to skip disposed instances must `unregister` them first.
+
+The fleet itself has no lifecycle (no dispose); `fleet.snapshot()` is always permitted on the fleet object regardless of which integrations are attached. The disposed-state guard is per-instance.
+
+#### 8.1.1 Pattern-state-cache preservation
+
+The fleet's event detection (§6.2) is diff-based: each `assessFleet()` compares the current per-instance pattern set against the cached previous set and emits `instanceDegraded` for new activations and `instanceRecovered` for resolutions. If the fleet's cache is reset on restore, the first `assessFleet()` after restore would emit `instanceDegraded` for every already-active pattern — a flood of false positives that breaks any caller dashboarding off these events.
+
+The serialized fleet snapshot **preserves** the pattern-state cache. A `SerializedFleet` includes:
+
+- Per-instance `activePatterns: string[]` (last-known pattern names)
+- Per-instance `patternActivatedAt: Record<string, number>` (per-pattern activation timestamp)
+- Per-instance `lastAssessedAt: number | null` (last fleet assessment timestamp)
+- Fleet-level `fleetDegradedState: boolean` (current degradation state for `fleetDegraded`/`fleetRecovered` diffing)
+
+On `fromSnapshot`, the fleet rehydrates these fields exactly. The first `assessFleet()` after restore is silent on the event channel for any pattern set that matches the snapshot's last-known state — only genuine transitions (new activations, new resolutions) emit events.
+
+If the caller wants the post-restore fleet to behave as if no prior state existed (e.g., to re-emit `instanceDegraded` for everything currently degraded), they can simply construct a fresh `ContextLensFleet`, register the restored instances manually, and skip `fromSnapshot`. This is a deliberate tradeoff: preservation is the default because event-diffing continuity is the more common need.
+
+#### 8.1.2 SerializedFleet shape
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `formatVersion` | string | `"context-lens-fleet-snapshot-v1"`. Independent of the per-instance `formatVersion` (cl-spec-014 §7) and the schema version (cl-spec-011). |
+| `timestamp` | number | Epoch-ms wall-clock at the time of capture. |
+| `fleetOptions` | object | `{ degradationThreshold: number }` — captured for restore. |
+| `instances` | array | Ordered list of `{ label, snapshot, trackingState }` entries. `snapshot` is a `SerializedState` per cl-spec-014 §4. `trackingState` carries the per-instance fleet-level diffing fields (section 8.1.1). |
+| `fleetState` | object | `{ fleetDegradedState: boolean }` — global diffing flag for `fleetDegraded`/`fleetRecovered`. |
+
+Order matters: the `instances` array is written in the fleet's registration order (the same order `listInstances()` returns) and restored in that order. Ranking, hotspot ordering, and `assessFleet().instances[]` ordering depend on registration order being stable across restore (Invariant 4).
+
+### 8.2 Restore
+
+```
+ContextLensFleet.fromSnapshot(state: SerializedFleet, config: FleetRestoreConfig) → ContextLensFleet
+```
+
+Static factory that reconstructs a fully functional fleet from a `SerializedFleet`. Equivalent to: construct a fresh fleet with the captured `fleetOptions`, `fromSnapshot` each instance with its corresponding `RestoreConfig`, register each restored instance under its original label, then rehydrate the fleet's pattern-state cache.
+
+**FleetRestoreConfig:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `default` | `RestoreConfig` | **Yes** | The `RestoreConfig` (cl-spec-014 §5.1) to use when no per-label entry applies. Provides tokenizer, embedding provider, and any custom patterns common to all instances. |
+| `perLabel` | `Record<string, RestoreConfig>` | No | Optional per-label overrides. If present and a label is in the map, that entry's `RestoreConfig` is used for that instance instead of `default`. Labels in `perLabel` that do not appear in the snapshot are ignored. |
+
+The per-label map exists because fleets in production typically run heterogeneous workloads — different agents may use different embedding providers, custom patterns, or capacities. Forcing one shared config across the entire fleet would require the caller to either constrain provider choice at construction time or handle per-label config externally.
+
+**Behavior:**
+
+1. Validate `formatVersion`. Throws `ConfigurationError` if the version is unrecognized (no fallback, no guess — same posture as cl-spec-014 §7).
+2. Validate `config.default` is non-null. Throws `ValidationError` otherwise.
+3. Construct a fresh `ContextLensFleet` with `state.fleetOptions`. The new fleet has no registered instances.
+4. For each entry in `state.instances` (in order):
+   a. Resolve the `RestoreConfig`: `config.perLabel[label]` if present, else `config.default`.
+   b. Call `ContextLens.fromSnapshot(entry.snapshot, restoreConfig)` to produce a live instance.
+   c. Call `fleet.register(restoredInstance, label)`. This re-establishes the lifecycle integration handshake (§3.1) and adds the instance to the tracked set. `fleet.register` validates that the instance is live (cl-spec-015 §6.2); since `fromSnapshot` always returns a live instance (cl-spec-014 §5.5), this check passes.
+   d. Rehydrate the per-instance tracking state from `entry.trackingState`: restore `activePatterns`, `patternActivatedAt`, `lastAssessedAt`.
+5. Set `fleet.fleetDegradedState` from `state.fleetState.fleetDegradedState`.
+6. Return the fully-restored fleet.
+
+**Atomicity.** If any step fails (e.g., one instance's `fromSnapshot` throws because its snapshot is malformed or its `RestoreConfig` is incompatible), the entire restore fails — no partially-restored fleet is returned, and any successfully-restored instances are abandoned (the caller must `dispose()` them if desired; the spec does not auto-dispose because the caller may want to inspect them). This matches cl-spec-014 §5.4 atomicity for instance restore.
+
+**Throws:**
+- `ConfigurationError` — unrecognized `formatVersion`.
+- `ValidationError` — missing `default` config; duplicate label in `instances` array; malformed `trackingState`.
+- Any error thrown by an inner `ContextLens.fromSnapshot` propagates verbatim. The error message includes the offending label for caller diagnosis.
+
+### 8.3 Format Versioning
+
+Fleet snapshots carry their own `formatVersion` (`"context-lens-fleet-snapshot-v1"`), independent of:
+
+- The per-instance `formatVersion` (`"context-lens-snapshot-v1"`, cl-spec-014 §7) — embedded instance snapshots evolve under cl-spec-014's versioning policy.
+- The schema version (cl-spec-011 §6) — applies to `QualityReport`, `DiagnosticSnapshot`, `EvictionPlan`; not to `SerializedFleet`.
+
+Three independent version axes evolve at three independent rates. A fleet snapshot at v1 may embed instance snapshots at any per-instance format version the cl-spec-014 evolution policy permits; the fleet wrapper is decoupled from the instance content.
+
+Future fleet-format changes follow the same evolution policy as cl-spec-014 §7:
+
+- Additive changes (new fields, new optional metadata) within a major version. Old consumers ignore unknown fields.
+- Breaking changes (renamed or removed fields, semantic shifts) require a major version bump (`-v2`).
+- Backward-compat deprecation cycles are at the implementation's discretion; the spec is not prescriptive.
+
+The version is the only field a `fromSnapshot` consumer must check before doing structural work — `fromSnapshot` validates first, then parses. An unrecognized version produces a `ConfigurationError` with the offending value in the error details (Invariant 8).
+
+---
+
+## 9. Invariants and Constraints
 
 **Invariant 1: Read-only consumer.** The fleet monitor does not call segment-mutating methods or configuration-mutating methods on registered instances. It calls `assess()` (or uses cached reports), `getCapacity()`, and `getSegmentCount()` — all of which are non-mutating reads or cache-updating computations.
 
@@ -362,18 +471,23 @@ If the caller has not registered fleet events and instead detects "missing" inst
 
 **Invariant 9: Per-instance sequential access.** The strict-sequential contract from cl-spec-007 §12 applies to every registered instance individually. `assessFleet()` invokes `assess()` on each instance sequentially (§1), so the fleet itself never violates the contract. Distinct instances in the fleet may still be mutated concurrently from different async contexts — the fleet does not coordinate across-instance concurrency, and instance independence (Invariant 2) makes that pattern safe. Callers needing parallel per-instance assessment (e.g., many instances in flight at once) must implement that themselves while observing the per-instance sequential contract on each.
 
-**Serialization.** Fleet state is not serializable. The fleet holds instance references, not instance state. To persist and restore a fleet, serialize individual instances via `snapshot()` (cl-spec-014), restore them via `fromSnapshot()`, and re-register with a new fleet instance.
+**Invariant 10: Pattern-state continuity across serialization.** A fleet restored via `fromSnapshot` rehydrates its per-instance pattern tracking state (§8.1.1). The first `assessFleet()` after restore is silent on the event channel for any pattern set that matches the snapshot's last-known state — only genuine transitions emit events. This preserves event-diffing continuity across the snapshot/restore boundary; callers who want to re-emit `instanceDegraded` for everything currently degraded should bypass `fromSnapshot` and register manually instead.
+
+**Invariant 11: Fleet snapshot atomicity.** `fleet.snapshot()` is all-or-nothing. If any registered instance's `snapshot()` fails (e.g., the instance has been disposed without prior `unregister`), the fleet's snapshot call propagates the underlying error and produces no partial output. `fromSnapshot` is symmetric — a failure at any instance restoration step abandons the partially-restored fleet (the spec does not auto-dispose successfully-restored instances; the caller must clean up if desired).
+
+**Invariant 12: Fleet snapshot version independence.** The fleet snapshot's `formatVersion` (`"context-lens-fleet-snapshot-v1"`) is independent of the per-instance `formatVersion` (cl-spec-014 §7) and the schema version (cl-spec-011 §6). The fleet wrapper evolves at its own rate; embedded instance snapshots evolve under cl-spec-014's rules; report/diagnostic schemas evolve under cl-spec-011's rules. `fromSnapshot` validates each axis independently.
 
 ---
 
-## 9. References
+## 10. References
 
 | Reference | Description |
 |-----------|-------------|
 | `cl-spec-007` (API Surface) | Defines the public API that the fleet consumes: `assess()`, `getCapacity()`, `getSegmentCount()`, the lifecycle methods (`dispose`, `isDisposed`, `isDisposing`), and the `DisposedError` raised on disposed-instance method calls. §12 defines the strict-sequential per-instance invocation contract that the fleet inherits (Invariant 9). The fleet is a consumer of this API. |
 | `cl-spec-003` (Degradation Patterns) | Defines the pattern detection results that the fleet aggregates into hotspots and fleet-level degradation events. |
 | `cl-spec-011` (Report Schema) | Defines schema conventions followed by the FleetReport. The fleet report extends the schema vocabulary with fleet-specific types (FleetAggregate, Hotspot, FleetCapacity). |
-| `cl-spec-015` (Instance Lifecycle) | Defines the lifecycle-aware integration model that this spec implements. Section 7 (Instance Disposal Handling) specifies the per-fleet teardown callback contract executed during step 3 of an instance's `dispose()` teardown sequence. cl-spec-015 §6.3 enumerates the same fleet-side behavior from the lifecycle perspective. |
+| `cl-spec-014` (Serialization) | Defines per-instance `snapshot()` and `fromSnapshot()`. Section 8 of this spec wraps that contract — a `SerializedFleet` embeds one `SerializedState` (cl-spec-014 §4) per registered instance verbatim. The fleet's restore propagates a `RestoreConfig` (cl-spec-014 §5.1) per label via the `FleetRestoreConfig` shape (§8.2). |
+| `cl-spec-015` (Instance Lifecycle) | Defines the lifecycle-aware integration model that this spec implements. Section 7 (Instance Disposal Handling) specifies the per-fleet teardown callback contract executed during step 3 of an instance's `dispose()` teardown sequence. cl-spec-015 §6.3 enumerates the same fleet-side behavior from the lifecycle perspective. cl-spec-014 §3 governs the post-disposal rejection that propagates to `fleet.snapshot()` (Invariant 11). |
 
 ---
 
