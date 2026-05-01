@@ -2,11 +2,11 @@
 id: cl-spec-009
 title: Performance Budget
 type: design
-status: draft
+status: draft (amended)
 created: 2026-04-04
-revised: 2026-04-04
-authors: [Akil Abderrahim, Claude Opus 4.6]
-tags: [performance, budget, latency, complexity, scaling, memory, sampling, measurement]
+revised: 2026-05-01
+authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
+tags: [performance, budget, latency, complexity, scaling, memory, sampling, measurement, manual-release]
 depends_on: [cl-spec-005, cl-spec-006, cl-spec-007]
 ---
 
@@ -546,7 +546,64 @@ Approximate total memory (excluding content strings) for common configurations:
 
 **Key takeaway:** Memory overhead is dominated by the embedding/trigram cache, which is bounded by `embeddingCacheSize` and the embedding dimension. The per-segment overhead (~340 bytes) is negligible even at n = 2,000 (~680KB). Callers who are memory-constrained should tune `embeddingCacheSize` and consider lower-dimensional embeddings — these are the two levers with the highest impact.
 
-Memory is released when the instance is garbage collected. Cache sizes are bounded by construction-time configuration. History buffers are bounded by ring buffer limits (cl-spec-010). No explicit cache-clearing API is provided in v1.
+Memory is released when the instance is garbage collected. Cache sizes are bounded by construction-time configuration. History buffers are bounded by ring buffer limits (cl-spec-010). For long-lived sessions where the bounded steady state is still too much memory, the API surface adds explicit cache-management primitives (section 6.5 below).
+
+### 6.5 Manual Memory Release (v0.2.0+)
+
+The construction-time cache bounds (sections 6.2, 6.3) cap memory consumption at the LRU steady state. For long-lived sessions — monitoring daemons, multi-agent orchestrators, server processes handling rolling contexts — the bounded steady state may still exceed the deployment's memory budget, or an external signal (memory pressure, idle reclaim, post-snapshot continuation) may demand a fresh start. cl-spec-007 §8.9 adds three primitives for caller-initiated cache management:
+
+| Method | Purpose | Cost |
+|--------|---------|------|
+| `clearCaches(kind?)` | Empty one or more derived caches | O(c) where c is entries dropped — sub-millisecond at default sizes |
+| `setCacheSize(kind, size)` | Resize a cache's maximum-entry capacity at runtime | O(d) where d is entries evicted on shrink — sub-millisecond at default deltas |
+| `getMemoryUsage()` | Estimate current cache memory | O(1) — Tier 1 query (<1 ms) |
+
+These methods operate on the three derived caches (token count, embedding, similarity). They do not touch the segment store, baseline, continuity ledger, pattern history, report history, or any other source-of-truth state — clearing those would corrupt scoring (continuity is cumulative; baseline is immutable; history drives trend analysis).
+
+#### 6.5.1 Estimate formula for getMemoryUsage
+
+The `estimatedBytes` field on each `CacheUsage` (cl-spec-007 §8.9.3) is computed from per-entry coefficients keyed on cache kind and active mode. The coefficients are pessimistic against typical V8 / SpiderMonkey / JSC heap layouts, so the estimate trends slightly high on small caches and within ±20% of the true heap cost on large caches:
+
+| Cache | Per-entry estimate | Notes |
+|-------|-------------------|-------|
+| Token count cache | `entries × 100 bytes` | Hash key + provider name reference + 8-byte count + LRU node overhead. Independent of provider. |
+| Embedding cache (embedding mode) | `entries × (dimensions × 8 + 100)` bytes | Float64 vector + key + LRU overhead. Float32 storage is not used (cl-spec-005 stores `number[]`); the coefficient assumes V8's standard double-precision array representation. |
+| Embedding cache (trigram mode) | `entries × 8000 bytes` | Average Set<string> size for ~1,000–2,000-character segments × ~5–10 bytes per trigram entry × Set overhead. Highly content-dependent; the estimate is intentionally conservative. |
+| Similarity cache | `entries × 80 bytes` | Two hash strings + mode tag + score + LRU overhead. Mode-independent. |
+
+The total is the sum of the three caches' bytes. The formula is intentionally simple — exact accounting requires runtime introspection that JavaScript does not portably provide (`performance.memory` is non-standard and Chromium-only; `process.memoryUsage` is process-wide, not per-instance), and a complex estimate would create the illusion of precision without its substance.
+
+The estimate is an estimate. Callers needing exact memory accounting must measure at the runtime level and accept the per-runtime portability cost.
+
+#### 6.5.2 Rebuild cost after clearCaches
+
+`clearCaches` is fast (O(c) entries dropped); the subsequent `assess()` may be slow because the cleared caches must rebuild from cold:
+
+| Cache cleared | First `assess()` after clear | Steady-state thereafter |
+|---------------|-------------------------------|-------------------------|
+| `'tokenizer'` only | Same as steady-state — segments retain stored `tokenCount` (cl-spec-006 §4.6); the cache rebuilds opportunistically on the next mutation. | Unchanged. |
+| `'similarity'` only | One full pairwise sweep at the relevant n — comparable to a cold-start assessment but with embedding cache still warm (no provider calls). | Returns to steady state once the LRU steady state is reached. |
+| `'embedding'` only or `'all'` | Provider-bound — every active segment's content needs re-preparation. With a remote provider and 100 active segments: ~100 cache misses, 1 batch call (or N parallel calls if no batch support), ~100–500 ms typical. With trigrams: pure CPU, < 50 ms typical at n = 100. | Returns to steady state on the second assess. |
+
+`clearCaches('all')` is the canonical post-snapshot or memory-reclaim primitive. Callers performing continuous reclamation (e.g., on a timer) should monitor the rebuild cost and the embedding provider rate-limit budget — clearing too aggressively turns the embedding provider into the bottleneck.
+
+#### 6.5.3 setCacheSize semantics
+
+`setCacheSize(kind, size)` is a configuration change that mutates the cache's maximum-entry bound. It is not a clear: a grow leaves entries unchanged; a shrink evicts the least-recently-used entries until the new bound is satisfied.
+
+`size = 0` is permitted (per cl-spec-007 §8.9.2) and effectively disables the cache: every set is immediately evicted. The use case is short-lived, memory-constrained sessions where the caller accepts the rebuild cost on every operation. Disabling the embedding cache against a remote provider is rarely a good idea (every assessment becomes provider-bound); disabling the similarity cache is reasonable for tight assessment loops where each call mutates content (cache hit rate is near zero anyway).
+
+#### 6.5.4 Long-lived session guidance
+
+For sessions running indefinitely:
+
+1. Set cache bounds at construction to fit the deployment's memory budget. Use the scaling table (section 6.4) plus the per-entry estimates above as planning inputs.
+2. Periodically call `getMemoryUsage()` to confirm the steady state is what was budgeted. Provider switches (cl-spec-005 §6, cl-spec-006 §5.2) may temporarily inflate the embedding cache.
+3. Use `clearCaches('embedding')` on a long-idle threshold (e.g., 5 minutes of no `assess()` activity) to release the largest cache without losing segment state. Cost: the next `assess()` re-prepares all active segments.
+4. Use `clearCaches('all')` after a `snapshot()` if the caller plans to dispose the instance — it lets the snapshot capture state without lingering cache memory holding the disposed-but-not-collected instance alive.
+5. `setCacheSize` is for permanent re-tuning, not idle reclamation. If memory pressure is sustained, shrink the bound; if it's transient, prefer `clearCaches`.
+
+The goal is bounded steady-state memory across an unbounded session lifetime. Construction-time bounds set the ceiling; manual release primitives provide the recovery valve.
 
 ---
 

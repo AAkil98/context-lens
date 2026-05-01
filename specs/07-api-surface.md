@@ -6,7 +6,7 @@ status: complete
 created: 2026-04-02
 revised: 2026-05-01
 authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
-tags: [api, public-interface, constructor, configuration, lifecycle, dispose, events, errors, serialization, snapshot, patterns, concurrency]
+tags: [api, public-interface, constructor, configuration, lifecycle, dispose, events, errors, serialization, snapshot, patterns, concurrency, memory]
 depends_on: [cl-spec-001, cl-spec-002, cl-spec-003, cl-spec-004, cl-spec-005, cl-spec-006]
 ---
 
@@ -60,7 +60,7 @@ Stateful does not mean persistent. Instance state lives in memory for the sessio
 
 ### API categories
 
-The public API is organized into twelve categories:
+The public API is organized into thirteen categories:
 
 | Category | Purpose | Key methods |
 |----------|---------|-------------|
@@ -73,6 +73,7 @@ The public API is organized into twelve categories:
 | **Serialization** | Produce schema-conforming output | `toJSON`, `schemas`, `validate`, `snapshot`, `fromSnapshot` |
 | **Provider management** | Configure tokenizer and embedding providers | `setTokenizer`, `setEmbeddingProvider`, `getTokenizerInfo`, `getEmbeddingProviderInfo` |
 | **Capacity and inspection** | Query window state without scoring | `getCapacity`, `setCapacity`, `getSegment`, `listSegments`, `getSegmentCount`, `getEvictionHistory` |
+| **Memory management** | Inspect and bound cache memory consumption | `clearCaches`, `setCacheSize`, `getMemoryUsage` |
 | **Diagnostics** | Inspect internal state | `getDiagnostics` |
 | **Eviction planning** | Produce advisory eviction plans | `planEviction` |
 | **Lifecycle** | Transition the instance to its terminal state and probe lifecycle state and identity | `dispose`, `isDisposed`, `isDisposing`, `instanceId` |
@@ -1024,6 +1025,110 @@ Options: `strategy` (override auto-selection), `includeSeeds` (default false), `
 
 See cl-spec-008 for the complete EvictionPlan structure and ranking algorithm.
 
+### 8.9 Memory Management
+
+Long-lived `ContextLens` instances accumulate cache state up to the configured bounds — token counts, embeddings, similarity scores. In monitoring daemons, multi-agent orchestrators, and rolling-context server processes, these caches reach their LRU steady state and stay there for the session's duration. The methods in this subsection give the caller explicit, advisory control over cache memory: empty what's there, change how much is allowed, or measure what's currently held. They are advisory in the sense that context-lens already bounds caches via LRU eviction at construction-time limits; the caller invokes these only when the bounded steady state is still too much memory or when an external signal demands a fresh recompute.
+
+The methods operate exclusively on the three derived caches: token counts (cl-spec-006 §5), embeddings or trigram sets (cl-spec-005 §5), and pairwise similarity (cl-spec-002 §3.2). They never touch the segment store, group store, task state, baseline, continuity ledger, pattern state, report history, or any history buffer — clearing those would corrupt scoring (continuity is cumulative; baseline is immutable; history drives trend analysis).
+
+The full memory-budget context — per-entry byte estimates, total-cache estimate formulas, long-lived guidance — is in cl-spec-009 §6.5.
+
+#### 8.9.1 clearCaches
+
+```
+clearCaches(kind?: CacheKind): void
+```
+
+Empties one or more derived caches.
+
+**CacheKind:** `"tokenizer" | "embedding" | "similarity" | "all"`. Default: `"all"`.
+
+**Behavior:**
+
+1. `"tokenizer"`: clears the token count cache (cl-spec-006 §5). Active segments retain their stored `tokenCount` field — the cache is the memoization layer, not the source of truth. Subsequent content-mutating operations recompute counts from the active provider and repopulate.
+2. `"embedding"`: clears the embedding cache (cl-spec-005 §5). All cached vectors and trigram sets are dropped. The next `assess()` re-prepares content for any active segment that needs similarity computation, calling the embedding provider as required.
+3. `"similarity"`: clears the similarity cache (cl-spec-002 §3.2). The next `assess()` recomputes pairwise similarity scores from cached embeddings (cheap if embeddings are still cached, expensive otherwise).
+4. `"all"`: clears all three in the order above. Equivalent to three sequential calls but emits a single `cachesCleared` event covering the combined operation.
+
+**No segment mutation.** The method does not touch the segment store, group store, task state, baseline, continuity ledger, pattern tracking state, pattern history, report history, session timeline, warning accumulator, or any other history buffer. It is purely a cache-management primitive.
+
+**Performance.** O(c) where c is the number of cache entries dropped — sub-millisecond at default cache sizes (cl-spec-009 §6.5). The next `assess()` after `clearCaches('embedding')` or `clearCaches('all')` may be substantially slower than the steady-state assess because content has to be re-prepared; cl-spec-009 §6.5 documents the rebuild cost.
+
+**Emits:** `cachesCleared` event with payload `{ kind, entriesCleared }` (section 10.2). `entriesCleared` is a per-cache breakdown of how many entries were dropped, regardless of which kind was requested — caller-visible metric for ops dashboards.
+
+**Throws:** `ValidationError` if `kind` is not a recognized `CacheKind`. Throws `DisposedError` post-disposal per cl-spec-015.
+
+#### 8.9.2 setCacheSize
+
+```
+setCacheSize(kind: Exclude<CacheKind, "all">, size: number): void
+```
+
+Resizes a single cache's maximum-entry capacity at runtime.
+
+**Preconditions:**
+
+- `kind` must be one of `"tokenizer"`, `"embedding"`, `"similarity"` (no `"all"` — the caller must specify exactly one cache, because the three caches have different practical size ranges per the table below).
+- `size` must be a non-negative integer. `size = 0` is permitted and disables the cache: every `set` operation is immediately evicted, every `get` is a miss, and the next `getMemoryUsage()` reports zero entries for that kind.
+
+**Behavior:**
+
+1. If `size >= currentMaxSize`: updates the bound; existing entries are unaffected. Future `set` calls may grow the cache up to the new limit.
+2. If `size < currentMaxSize`: updates the bound and evicts least-recently-used entries until `cache.size <= size`.
+3. If `size === 0`: drops every existing entry. Subsequent `set` operations effectively no-op (the entry is created and immediately evicted by the size-0 bound).
+
+The resize is atomic from the caller's perspective — no other public method on the same instance can observe a partially-resized cache (single-threaded contract per §12).
+
+**Performance.** O(d) where d is the number of entries evicted on shrink. For a shrink from 4,096 to 1,024 with a full cache: ~3,000 evictions, sub-millisecond. `size = 0` from a full default cache is at most ~16,384 evictions (similarity cache default), still well under the assessment budget.
+
+**Per-cache guidance:**
+
+| Kind | Useful range | When `size = 0` makes sense |
+|------|--------------|----------------------------|
+| `"tokenizer"` | 256–16,384 | Rarely useful — token counting is cheap and the cache footprint is small (~400 KB at default). |
+| `"embedding"` | 256–16,384 | Memory-constrained deployments where re-embedding on every assessment is acceptable. Significantly impacts both assessment latency and provider cost (each cache miss is a provider call). |
+| `"similarity"` | 1,024–65,536 | Tight assessment loops where each call mutates content — caching adds little because pairs rarely repeat across assessments. |
+
+**Does not emit `cachesCleared`** even when shrinking causes entry eviction. Resize is a configuration change with a side effect; `cachesCleared` is reserved for explicit clear operations. The dropped entries are reflected in the next `getMemoryUsage()` snapshot.
+
+**Throws:** `ValidationError` if `kind` is not recognized or `size` is not a non-negative integer. Throws `DisposedError` post-disposal.
+
+#### 8.9.3 getMemoryUsage
+
+```
+getMemoryUsage(): MemoryUsage
+```
+
+Returns an estimate of the instance's current cache memory consumption. Read-only; does not trigger any computation. Tier 1 (<1 ms) per cl-spec-009.
+
+**MemoryUsage:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tokenizer` | `CacheUsage` | Token count cache. |
+| `embedding` | `CacheUsage` | Embedding / trigram cache. |
+| `similarity` | `CacheUsage` | Pairwise similarity cache. |
+| `totalEstimatedBytes` | number | Sum of the three `estimatedBytes` fields. Does not include segment content, history buffers, the continuity ledger, the segment store, or other instance state — the caches are the variable-cost surface this report covers. |
+
+**CacheUsage:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `entries` | number | Current entry count. |
+| `maxEntries` | number | Configured maximum — the value last set via `setCacheSize` or construction. |
+| `estimatedBytes` | number | Approximate bytes consumed by the current entries. The estimate is a coarse, mode-aware function of entry count and per-entry size; the formula is documented in cl-spec-009 §6.5. |
+
+The byte figures are **estimates**, not exact measurements. JavaScript provides no portable, accurate per-object memory query (`performance.memory` is non-standard and Chromium-only; `process.memoryUsage` is process-wide, not per-instance). Exact accounting would require runtime introspection that is not portable across V8/SpiderMonkey/JSC. The estimate uses fixed bytes-per-entry coefficients keyed on cache kind and — for the embedding cache — provider mode (embeddings vs. trigrams) and dimensions. The expected error band is documented in cl-spec-009 §6.5; in typical deployments the estimate is within ±20% of the true heap footprint.
+
+**Use cases:**
+
+- Long-running daemons logging memory growth across sessions
+- Capacity planning: confirming the configured cache sizes fit the deployment's memory budget
+- Pre/post comparison around `clearCaches` or `setCacheSize` to verify memory was reclaimed
+- Diagnostic dumps when investigating memory issues, included alongside `getDiagnostics()` output
+
+**Throws:** `DisposedError` post-disposal.
+
 ---
 
 ## 9. Lifecycle
@@ -1084,7 +1189,7 @@ The value matches the identifier carried by the `stateDisposed` event payload (s
 
 ## 10. Event System
 
-context-lens emits 25 events on lifecycle transitions. The event system is synchronous and observer-based — handlers are called inline during the operation that triggers the event. This means handlers execute before the triggering method returns.
+context-lens emits 26 events on lifecycle transitions. The event system is synchronous and observer-based — handlers are called inline during the operation that triggers the event. This means handlers execute before the triggering method returns.
 
 ### 10.1 Subscribing
 
@@ -1125,6 +1230,7 @@ Multiple handlers can be registered for the same event. Handlers are called in r
 | `reportGenerated` | `{ report: QualityReport }` | Fired after each `assess()` completes. Payload: the QualityReport. |
 | `budgetViolation` | `{ operation: string, selfTime: number, budgetTarget: number }` | Fired when an operation exceeds its performance budget tier. |
 | `stateDisposed` | `{ type: 'stateDisposed', instanceId: string, timestamp: number }` | Fired exactly once per instance during step 2 of `dispose()` teardown. Last event the instance ever emits. Payload is frozen. See cl-spec-015 §7.1. |
+| `cachesCleared` | `{ kind: CacheKind, entriesCleared: { tokenizer: number, embedding: number, similarity: number } }` | Fired by `clearCaches()` (section 8.9.1) after the requested caches are emptied. `entriesCleared` reports the per-cache count of dropped entries — useful for ops dashboards and pre/post memory comparisons. Not emitted by `setCacheSize()` shrinks (those are configuration changes, not explicit clears). |
 
 The session timeline (cl-spec-010 section 5) records a superset of API events. Some timeline event types (e.g., `patternEscalated`, `patternDeescalated`) are logged to the timeline but not emitted as API events.
 

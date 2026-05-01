@@ -469,6 +469,16 @@ The embedding cache has a simple invalidation model because embeddings are deter
 
 **`clearTask` removes the task entry.** When `clearTask` is called (cl-spec-004 section 4.2), the task description's embedding is no longer needed. The cache entry is not actively removed (it is benign and LRU will reclaim it), but the reference from task state to the cached embedding is dropped.
 
+### 5.5 Manual Release
+
+The embedding cache supports caller-initiated manual release via the API surface defined in cl-spec-007 §8.9. Three operations apply:
+
+- **`clearCaches('embedding')` or `clearCaches('all')`** — drops every cached vector / trigram set. Active segments retain their content; the next `assess()` re-prepares (re-embeds, or re-computes trigrams for) any active segment that needs a similarity computation. Each cache miss against a configured provider is a fresh `embed` call, so the cost of the first post-clear assessment is dominated by provider latency rather than context-lens computation. Trigram mode incurs only local CPU cost.
+- **`setCacheSize('embedding', size)`** — resizes the cache at runtime. Shrinking evicts least-recently-used entries until the bound is satisfied; growing leaves existing entries unchanged. `size = 0` is permitted and disables the cache (every embedding lookup becomes a miss); the use case is short-lived, memory-constrained sessions where re-embedding on every assess is acceptable. cl-spec-007 §8.9.2 documents the per-cache guidance.
+- **`getMemoryUsage()`** — reports the current `entries`, `maxEntries`, and `estimatedBytes` for the embedding cache. The `estimatedBytes` figure uses the formula in cl-spec-009 §6.5 (mode-aware: dimensions for embeddings, average trigram-set size for trigram mode).
+
+Manual release does not affect the embedding provider itself, the active mode (embedding vs. trigram), or any segment's content. The cache is a memoization layer between the provider and similarity computation; clearing it forfeits memoization but preserves all other state. The provider lifecycle remains caller-managed (Invariant 11) — `clearCaches` does not invoke any provider shutdown hook.
+
 ---
 
 ## 6. Provider Switching
