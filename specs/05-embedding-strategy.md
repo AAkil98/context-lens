@@ -4,7 +4,7 @@ title: Embedding Strategy
 type: design
 status: complete
 created: 2026-04-01
-revised: 2026-04-29
+revised: 2026-05-01
 authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
 tags: [embedding, similarity, provider, adapter, fallback, trigram, caching]
 depends_on: [cl-spec-002]
@@ -118,7 +118,7 @@ embed(text: string) → number[]
 
 - **Deterministic for identical input.** The same text must produce the same vector from the same provider instance. This is load-bearing — embedding caching (section 5) depends on it. Most embedding models are deterministic by nature (no sampling), but providers that add noise, use approximate inference, or randomize for privacy must document this and accept that caching may serve stale-on-first-call results.
 - **Stateless.** `embed` must not depend on previously embedded texts, call ordering, or accumulated state. context-lens may call `embed` in any order, skip calls for cached content, or repeat calls on cache miss. The result must depend only on the input text and the model.
-- **Thread-safe.** context-lens may call `embed` from multiple execution contexts if the runtime supports it. The provider must not corrupt internal state on concurrent calls. Providers that are inherently single-threaded (e.g., a local ONNX model on one GPU) should serialize internally rather than relying on context-lens to serialize externally.
+- **Thread-safe across instances.** context-lens guarantees per-instance sequential invocation (cl-spec-007 §12) — within a single context-lens instance the provider sees at most one in-flight call. A provider object may, however, be shared across multiple context-lens instances; in that case it may receive concurrent calls from instances running in different execution contexts, and must not corrupt internal state under that pattern. Providers that are inherently single-threaded (e.g., a local ONNX model on one GPU) should serialize internally rather than relying on context-lens to serialize externally.
 
 Unlike the tokenizer interface (cl-spec-006 section 2.1), `embed` is **not required to be synchronous**. Embedding frequently involves network calls to remote APIs (OpenAI, Cohere, Voyage) or GPU inference for local models — both have inherent latency that cannot be hidden behind a synchronous interface without blocking. The contract is: `embed` returns a Promise that resolves to the vector. context-lens awaits the result before proceeding. From the caller's perspective, lifecycle operations that trigger embedding (addSegment, setTask) are still effectively synchronous — they do not return until the embedding is complete. The async boundary is internal to the provider call, not exposed to the caller.
 
@@ -640,6 +640,7 @@ These invariants are guarantees that the implementation must uphold and that con
 | `cl-spec-003` (Degradation Patterns) | Pattern thresholds operate on similarity scores produced by the embedding or trigram path |
 | `cl-spec-004` (Task Identity) | Task description embedding (section 6.1), trigram fallback (section 6.2), preparation caching (section 6.3) |
 | `cl-spec-006` (Tokenization Strategy) | Parallel provider abstraction pattern — one required method, optional batch, metadata. Cache structure (LRU, content-hash keyed). Provider switch triggers full recount/recomputation |
+| `cl-spec-007` (API Surface) | §12 defines the strict-sequential per-instance invocation contract that scopes provider call ordering. The §2.1 "Thread-safe across instances" bullet anchors the multi-instance shared-provider case to that contract. |
 | `cl-spec-015` (Instance Lifecycle) | Defines `dispose()` and the boundary between library-managed and caller-managed resources. The embedding provider falls on the caller-managed side: §3.4 of this spec and §6.5 of cl-spec-015 jointly specify that `dispose()` does not invoke provider shutdown hooks and the caller must shut down providers after `dispose()` returns. Invariant 11 is the canonical statement of this boundary. |
 
 ---

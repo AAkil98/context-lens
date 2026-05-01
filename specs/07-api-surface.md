@@ -4,9 +4,9 @@ title: API Surface
 type: design
 status: complete
 created: 2026-04-02
-revised: 2026-04-29
+revised: 2026-05-01
 authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
-tags: [api, public-interface, constructor, configuration, lifecycle, dispose, events, errors, serialization, snapshot, patterns]
+tags: [api, public-interface, constructor, configuration, lifecycle, dispose, events, errors, serialization, snapshot, patterns, concurrency]
 depends_on: [cl-spec-001, cl-spec-002, cl-spec-003, cl-spec-004, cl-spec-005, cl-spec-006]
 ---
 
@@ -25,8 +25,9 @@ depends_on: [cl-spec-001, cl-spec-002, cl-spec-003, cl-spec-004, cl-spec-005, cl
 9. Lifecycle
 10. Event System
 11. Error Model
-12. Invariants and Constraints
-13. References
+12. Concurrency and Isolation
+13. Invariants and Constraints
+14. References
 
 ---
 
@@ -1205,7 +1206,85 @@ The lifecycle errors are not assigned `code` strings — they are distinguished 
 
 ---
 
-## 12. Invariants and Constraints
+## 12. Concurrency and Isolation
+
+context-lens is single-threaded. Each instance assumes strictly sequential access from one execution context. Concurrent or overlapping invocations on a single instance produce undefined behavior — context-lens does not guard against them, does not detect them, and does not document a guaranteed observable outcome. Callers in async or multi-threaded environments must serialize access externally.
+
+This section makes the contract explicit, identifies the undefined-behavior zones the caller must avoid, documents safe access patterns, and states the explicitly unsupported configurations. It supersedes the buried "Single-threaded access" paragraph that the Invariants section formerly carried.
+
+### 12.1 The strict-sequential contract
+
+At any point in time, **at most one public method is in flight on a given instance**. The contract is:
+
+- A public method invocation **begins** when the caller calls the method and **ends** when the method returns or throws.
+- For async methods — those that return a Promise, per §1 — the in-flight period extends from the call until the returned promise settles. Settlement (resolution, rejection, or the caller awaiting it) marks the end of the in-flight period.
+- The next public method call on the same instance must not begin before the previous one's in-flight period ends.
+
+This applies to **every public method** — both mutating and non-mutating. **Read-read overlap is not permitted.** Two concurrent `assess()` calls, two concurrent `getDiagnostics()` calls, or a `listSegments()` overlapping with `assess()` are all undefined behavior. The justification is internal:
+
+- `assess()` updates incremental caches and pattern hysteresis state (cl-spec-002, cl-spec-003) — overlapping callers may interleave cache writes.
+- `getDiagnostics()` reads incrementally-maintained state synchronized with the event stream (cl-spec-010) — concurrent reads against a mutating snapshot may observe torn state.
+- `listSegments()` snapshots over a structure mutated by other public methods — overlapping with any mutation observes inconsistent membership.
+
+None of these state machines tolerate overlapping observers, so the contract is one-in-flight, full stop.
+
+The lifecycle methods `dispose`, `isDisposed`, `isDisposing`, and `instanceId` are the **only** methods that may be invoked at any time, including reentrantly during the disposal sequence (cl-spec-015 §3.5, §6.1). The caller's serialization layer may exempt them.
+
+Sequential access is the **only** supported access pattern. A correctly-written caller observes the contract; an incorrect caller may observe corrupt scores, stale token aggregates, lost or duplicate events, partial mutations on the next operation, or exceptions that the API never documents. context-lens does not promise any specific failure mode — only that the failure space is unbounded.
+
+### 12.2 Undefined-behavior zones
+
+Four classes of caller mistake produce undefined behavior. Each is unsupported and unguarded:
+
+| Zone | Example | Why it breaks |
+|------|---------|---------------|
+| **Overlapping mutations** | Calling `add(a)` and `add(b)` without awaiting the first | Token aggregates (cl-spec-006 §4.4), continuity ledger (cl-spec-002), and event ordering (§13 Invariant 5) all require atomic transitions. Overlapping mutations interleave the transitions in unpredictable ways. |
+| **Concurrent assessment** | Two unawaited `assess()` calls | Quality cache invalidation (cl-spec-002), pattern hysteresis tracking (cl-spec-003), and report history (cl-spec-010) are all stateful. Concurrent `assess()` produces interleaved cache writes and may emit duplicate or missing pattern transition events. |
+| **Overlapping provider calls** | Issuing the next mutation while the previous one's `embed` await is outstanding | The lifecycle-synchronous embedding contract (cl-spec-005 §4.3, cl-spec-005 Invariant 8) requires that the embedding completes before the triggering operation returns. Overlapping the next operation breaks this — the second operation may observe a half-embedded segment from the first. |
+| **Re-entrant calls from event handlers** | An event handler calling `add()` or `assess()` on the same instance | The emitter is single-threaded with no re-entry guard (§10.3, §13 Invariant 6). The handler call stack and the operation that emitted the event share state in ways that the in-flight operation has not yet committed. Re-entry observes a partial state. |
+
+The fourth zone is the special case of the first three where the second invocation arrives on the same call stack rather than from a different async context. It is governed by the same "undefined" verdict and the same one-instance-at-a-time remedy — the caller's serialization layer must include event handlers.
+
+The `stateDisposed` handler exception (§10.3) is **not** a re-entrancy exception. It permits a defined subset of read-only methods during the in-flight `dispose()` call; mutating calls still throw `DisposedError` and do not fall through to "undefined behavior" (cl-spec-015 §3.4).
+
+### 12.3 Safe access patterns
+
+Concurrent callers (web servers, async pipelines, multi-agent orchestrators) must serialize their access to each instance. Three patterns suffice:
+
+**Mutex / lock around each instance.** A shared lock that serializes every public-method call. Each public method acquires the lock at entry and releases at the in-flight boundary (return for sync, promise settlement for async). Coarse-grained but trivially correct.
+
+```
+const lockedLens = withLock(new ContextLens({ capacity: 128000 }));
+await lockedLens.add({ ... });   // serialized
+await lockedLens.assess();       // serialized
+```
+
+**Actor / message queue per instance.** One queue, one consumer, all callers post messages to the queue. The consumer drains the queue sequentially, calling the underlying instance per message. Same effect as a mutex with a different ergonomic — message-based instead of method-based.
+
+**One instance per execution context.** If the application can structure its workload so that each async context, worker, or agent has its own context-lens instance, no serialization is needed. Distinct instances do not share state — concurrency between them is permitted (cl-spec-012 Invariant 2 covers the fleet case; the same applies to un-fleeted instances).
+
+Choice between the three is the caller's. context-lens does not ship a serialization helper — the patterns are caller-managed because they hinge on the caller's broader concurrency model (their event loop, their actor framework, their lock primitives).
+
+### 12.4 Unsupported configurations
+
+Two configurations are explicitly unsupported, beyond "the caller is responsible for serialization":
+
+**Multi-thread shared instances.** A single context-lens instance shared across worker threads, OS threads, or other true-parallel execution contexts is unsupported even when the caller serializes access via locking. The internal containers (LRU caches, ring buffers, similarity matrices, segment store) are not designed for cross-thread visibility — even with mutual exclusion, memory-model concerns (visibility, ordering, weak coherence) are out of scope. context-lens runs in single-threaded JavaScript runtimes (one event loop, one execution context per worker). To use it from multiple workers, give each worker its own instance.
+
+**`SharedArrayBuffer`-backed segment content.** Segments whose `content` field references a `SharedArrayBuffer`-backed string, or whose content mutates underneath context-lens after the lifecycle operation that received it returned, are unsupported. context-lens caches token counts and embeddings keyed on content hash (cl-spec-001, cl-spec-005 §5.1, cl-spec-006 §5.1). Mutating the underlying bytes after caching produces stale derivatives with no detection mechanism. The contract is: `content` is an immutable UTF-8 string at the moment it is passed to context-lens.
+
+### 12.5 Fleet and integration derivation
+
+The strict-sequential contract propagates to lifecycle-aware integrations of an instance:
+
+- **Fleet monitor** (cl-spec-012). `ContextLensFleet.assessFleet()` calls `assess()` on each registered instance **sequentially**. The fleet does not parallelize per-instance assessment (cl-spec-012 §1). Distinct instances in a fleet may still be mutated concurrently from different async contexts — the per-instance sequential rule applies to one instance at a time, not across instances. Callers needing parallel assessment across instances must coordinate it themselves while observing the per-instance contract (cl-spec-012 Invariant 9).
+- **OTel exporter** (cl-spec-013). The exporter subscribes to instance events and reads instance state on the same call stack as the emitting operation. The exporter therefore inherits the instance's strict-sequential contract — its handlers run inside the in-flight period of a public method on the instance, and that period is governed by §12.1.
+
+In both cases, the integration does not introduce additional concurrency relative to the underlying instances. The caller's serialization layer for an instance is sufficient for any integration that wraps it.
+
+---
+
+## 13. Invariants and Constraints
 
 The following invariants hold across all public API operations. They extend and do not contradict the invariants defined in specs 1–6.
 
@@ -1221,7 +1300,7 @@ The following invariants hold across all public API operations. They extend and 
 
 5. **Event ordering.** Events are emitted in a deterministic order relative to the operation that triggers them. For operations that emit multiple events (e.g., group eviction emits one `segmentEvicted` per member), events are emitted in segment order. All events for an operation are emitted before the method returns.
 
-6. **Re-entrancy prohibition.** Calling any mutating method on the same instance from within an event handler is undefined behavior. context-lens does not guard against this — the caller is responsible for avoiding re-entrancy.
+6. **Re-entrancy prohibition.** Calling any mutating method on the same instance from within an event handler is undefined behavior. The single exception — `stateDisposed` handlers calling read-only methods during the in-flight `dispose()` — is documented in §10.3 and cl-spec-015 §3.4. Re-entrancy is the same-call-stack form of the broader strict-sequential contract; see §12 for the full rule.
 
 7. **Provider consistency.** At any point in time, all token counts in the instance reflect the current tokenizer, and all embeddings (if any) reflect the current embedding provider. There is no state where some segments use one provider and others use a different one.
 
@@ -1230,8 +1309,6 @@ The following invariants hold across all public API operations. They extend and 
 **Read-only consumer contract.** Consumer modules (eviction advisory, diagnostics, fleet monitor, observability exporter) do not call segment-mutating methods (`add`, `update`, `replace`, `compact`, `split`, `evict`, `restore`) or configuration-mutating methods (`setTask`, `clearTask`, `setTokenizer`, `setEmbeddingProvider`). They may call `assess()`, which updates internal caches but does not modify segments or configuration.
 
 **Instance lifecycle.** context-lens instances have an explicit terminal state and the `dispose()` method that transitions to it (section 9, cl-spec-015). Long-lived callers (monitoring daemons, multi-agent orchestrators, server processes handling rolling contexts) **must** call `dispose()` to release event handlers, caches, history buffers, and external integration back-references — garbage collection alone is insufficient because event subscribers and integrations hold strong references that prevent GC. Short-lived callers **may** call `dispose()` to release resources earlier than GC would. After `dispose()` returns, `isDisposed === true` and every public method except `dispose`, `isDisposed`, `isDisposing`, and `instanceId` throws `DisposedError`. The full lifecycle contract — teardown sequence, atomicity, integration callbacks, error semantics — is specified by cl-spec-015. This invariant supersedes the prior "no explicit disposal" claim that this section formerly carried.
-
-**Single-threaded access.** context-lens assumes single-threaded, sequential access. Concurrent calls from multiple async contexts produce undefined behavior. Callers in async environments must serialize access to each instance. Re-entrant calls from event handlers are also prohibited (section 10.3).
 
 ### Cross-Spec Invariant Summary
 
@@ -1258,7 +1335,7 @@ This spec inherits all invariants from specs 1–6. The key cross-cutting invari
 
 ---
 
-## 13. References
+## 14. References
 
 | Reference | Description |
 |-----------|-------------|

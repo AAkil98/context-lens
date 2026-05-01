@@ -4,9 +4,9 @@ title: Fleet Monitor
 type: design
 status: complete
 created: 2026-04-04
-revised: 2026-04-29
+revised: 2026-05-01
 authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
-tags: [fleet, multi-instance, aggregation, monitoring, multi-agent, orchestration, lifecycle]
+tags: [fleet, multi-instance, aggregation, monitoring, multi-agent, orchestration, lifecycle, concurrency]
 depends_on: [cl-spec-007, cl-spec-011, cl-spec-015]
 ---
 
@@ -360,6 +360,8 @@ If the caller has not registered fleet events and instead detects "missing" inst
 
 **Invariant 8: Disposed-instance rejection at registration.** `fleet.register(instance, label)` rejects already-disposed instances with `DisposedError` (raised by the instance's public method that the fleet calls during attachment). The fleet does not silently accept a disposed instance and never emits events for one.
 
+**Invariant 9: Per-instance sequential access.** The strict-sequential contract from cl-spec-007 §12 applies to every registered instance individually. `assessFleet()` invokes `assess()` on each instance sequentially (§1), so the fleet itself never violates the contract. Distinct instances in the fleet may still be mutated concurrently from different async contexts — the fleet does not coordinate across-instance concurrency, and instance independence (Invariant 2) makes that pattern safe. Callers needing parallel per-instance assessment (e.g., many instances in flight at once) must implement that themselves while observing the per-instance sequential contract on each.
+
 **Serialization.** Fleet state is not serializable. The fleet holds instance references, not instance state. To persist and restore a fleet, serialize individual instances via `snapshot()` (cl-spec-014), restore them via `fromSnapshot()`, and re-register with a new fleet instance.
 
 ---
@@ -368,7 +370,7 @@ If the caller has not registered fleet events and instead detects "missing" inst
 
 | Reference | Description |
 |-----------|-------------|
-| `cl-spec-007` (API Surface) | Defines the public API that the fleet consumes: `assess()`, `getCapacity()`, `getSegmentCount()`, the lifecycle methods (`dispose`, `isDisposed`, `isDisposing`), and the `DisposedError` raised on disposed-instance method calls. The fleet is a consumer of this API. |
+| `cl-spec-007` (API Surface) | Defines the public API that the fleet consumes: `assess()`, `getCapacity()`, `getSegmentCount()`, the lifecycle methods (`dispose`, `isDisposed`, `isDisposing`), and the `DisposedError` raised on disposed-instance method calls. §12 defines the strict-sequential per-instance invocation contract that the fleet inherits (Invariant 9). The fleet is a consumer of this API. |
 | `cl-spec-003` (Degradation Patterns) | Defines the pattern detection results that the fleet aggregates into hotspots and fleet-level degradation events. |
 | `cl-spec-011` (Report Schema) | Defines schema conventions followed by the FleetReport. The fleet report extends the schema vocabulary with fleet-specific types (FleetAggregate, Hotspot, FleetCapacity). |
 | `cl-spec-015` (Instance Lifecycle) | Defines the lifecycle-aware integration model that this spec implements. Section 7 (Instance Disposal Handling) specifies the per-fleet teardown callback contract executed during step 3 of an instance's `dispose()` teardown sequence. cl-spec-015 §6.3 enumerates the same fleet-side behavior from the lifecycle perspective. |

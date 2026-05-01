@@ -271,7 +271,7 @@ Grill outcomes (2026-04-29) — three decisions applied to the spec; status flip
 
 ## Current state
 
-**v0.1.0 shipped to npm 2026-04-09. v0.2.0 Phase 6 (instance lifecycle / `dispose()`) complete and merged into `dev` 2026-04-30. Active branch `feat/v0.2-hardening` carries the remaining v0.2.0 hardening backlog (6 gaps; Gap 7 deferred to v0.3.0).**
+**v0.1.0 shipped to npm 2026-04-09. v0.2.0 Phase 6 (instance lifecycle / `dispose()`) complete and merged into `dev` 2026-04-30. Active branch `feat/v0.2-hardening` carries the remaining v0.2.0 hardening backlog. Gap 1 (concurrency model) shipped 2026-05-01 (spec-only). 5 open gaps remain; Gap 7 deferred to v0.3.0.**
 
 v0.1.0 baseline:
 - 33/33 build tasks done across 5 phases (~10,200 source LOC, ~15,500 test LOC)
@@ -298,10 +298,10 @@ Key Phase 6 implementation decisions (recorded in `IMPL_JOURNAL.md` per-task not
 
 v0.2.0 hardening backlog (drafted on `feat/v0.2-hardening`, commit `f32822f`):
 - `V0_2_0_BACKLOG.md` — actionable plan covering the remaining 7 gaps from `V0_2_0_DESIGN_STRATEGY.md`
-- Gap 2 (dispose) — done. Gaps 1, 3, 4, 5, 6, 8 — open. Gap 7 (provider resilience) — deferred to v0.3.0
-- Recommended sequence: Gap 1 (concurrency, spec-only) → Gap 4 (OTel re-attach) → Gap 6 (memory release) → Gap 3 (fleet serialization) → Gap 5 (assess@500 perf) → Gap 8 (runtime compat statement)
-- Decision-lock table at the top of the backlog enumerates 8 open questions; only Gap 5's a/b/c (tighter sampling vs. incremental similarity cache vs. LSH) needs an explicit pick before spec work begins — recommendation: option (b) with (a) as fallback above some N
-- Total scope estimate (all 6 gaps): ~40–55 commits, ~25–35 build tasks, ~50–80 new tests, 5 spec amendments + 0–1 new spec (cl-spec-016 if Gap 5 option b), 4 new impl specs
+- Gap 2 (dispose) — done (Phase 6). Gap 1 (concurrency) — **done 2026-05-01** (spec-only amendment to `cl-spec-007` §12 + cross-refs in `cl-spec-005`/`006`/`012`). Gaps 3, 4, 5, 6, 8 — open. Gap 7 (provider resilience) — deferred to v0.3.0
+- Decision locks confirmed 2026-05-01: read-read overlap not permitted (Gap 1, applied); mutable exporter binding (Gap 4); no multi-instance fan-in on exporter (Gap 4); Gap 5 option (b) incremental similarity cache picked, with (a) tighter sampling as fallback above N; estimate `getMemoryUsage` (Gap 6); `setCacheSize(kind, 0)` permitted (Gap 6); runtime statement-now-CI-later split (Gap 8)
+- Recommended next sequence (post-Gap-1): Gap 4 (OTel re-attach) → Gap 6 (memory release) → Gap 3 (fleet serialization) → Gap 5 (assess@500 perf, new `cl-spec-016`) → Gap 8 (runtime compat statement)
+- Total remaining scope (5 open gaps): ~35–50 commits, ~25–35 build tasks, ~50–80 new tests, 4 spec amendments + 1 new spec (`cl-spec-016` for Gap 5 option b), 4 new impl specs
 
 ### What's built
 
@@ -340,13 +340,13 @@ Phase 6 exit (v0.2.0 dispose, merged into `dev` 2026-04-30): **1116 tests** acro
 
 ## What's next
 
-**Resume on `feat/v0.2-hardening` (origin/feat/v0.2-hardening). Open `V0_2_0_BACKLOG.md` for the canonical 7-gap plan with per-gap scope, decision locks, and commit estimates.**
+**Resume on `feat/v0.2-hardening` (origin/feat/v0.2-hardening). Open `V0_2_0_BACKLOG.md` for the canonical plan with per-gap scope, decision locks, and commit estimates.**
 
-Active branch state: `feat/v0.2-hardening` is 1 commit ahead of `dev` (just `f32822f` — the backlog plan). `dev` carries Phase 6 (merge `0c35bf5`) plus the 4 post-v0.1.0 chore commits previously only on `main`. `main` unchanged. `feat/dispose-lifecycle` preserved on origin for archaeology.
+Active branch state: `feat/v0.2-hardening` is 2 commits ahead of `dev` — `f32822f` (backlog plan) and the Gap 1 spec amendment (2026-05-01). `dev` carries Phase 6 (merge `0c35bf5`) plus the 4 post-v0.1.0 chore commits previously only on `main`. `main` unchanged. `feat/dispose-lifecycle` preserved on origin for archaeology.
 
-**Decision needed before any code change:** confirm the 8 decision locks in `V0_2_0_BACKLOG.md` "Decision locks" table. Most have recommended defaults (just need a thumbs-up); Gap 5's a/b/c choice (tighter sampling vs. incremental similarity cache vs. LSH) needs an explicit pick — recommendation: option (b) with (a) as fallback above some N.
+**All 8 decision locks confirmed 2026-05-01.** Status table in `V0_2_0_BACKLOG.md` reflects each lock as applied (Gap 1) or confirmed (Gaps 4, 5, 6, 8). No remaining decisions block spec work on the open gaps.
 
-**Recommended first task on this branch:** Gap 1 concurrency amendment to `cl-spec-007` (smallest blast radius, no dependencies, exercises the spec-amendment cadence). Then sequence: Gap 4 → Gap 6 → Gap 3 → Gap 5 → Gap 8.
+**Recommended next task on this branch:** Gap 4 (OTel re-attach amendment to `cl-spec-013` + impl-spec). Builds on the Phase 6 integration registry already in code. Then sequence: Gap 6 (memory release) → Gap 3 (fleet serialization) → Gap 5 (assess@500 perf, new `cl-spec-016`) → Gap 8 (runtime compat statement, single paragraph).
 
 Each gap follows the spec-driven workflow: design spec or amendment → impl spec → coding tasks → regression sweep → commit cadence (one task = one commit, clean tree between each, hard floor 1116 tests).
 

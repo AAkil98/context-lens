@@ -4,7 +4,7 @@ title: Tokenization Strategy
 type: design
 status: complete
 created: 2026-03-25
-revised: 2026-04-29
+revised: 2026-05-01
 authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
 tags: [tokenization, token-counting, provider, performance, caching]
 depends_on: [cl-spec-001]
@@ -67,7 +67,7 @@ count(content: string) -> number
 **Constraints:**
 
 - **Deterministic.** The same input must always produce the same output for a given provider instance. This is load-bearing — caching (section 5) depends on it.
-- **Pure.** `count` must not mutate state, perform I/O, or have side effects. context-lens may call it from multiple threads or cache its results indefinitely.
+- **Pure.** `count` must not mutate state, perform I/O, or have side effects. context-lens may cache its results indefinitely. Per-instance call ordering is sequential (cl-spec-007 §12) — within one context-lens instance the tokenizer sees at most one in-flight call. A tokenizer object shared across multiple context-lens instances may receive concurrent calls from those instances and must remain pure under that pattern.
 - **Synchronous.** `count` returns immediately. context-lens does not support async token counting on the hot path. Providers that depend on network calls (e.g., a remote tokenization API) must handle latency internally — prefetch, local cache, or fail.
 - **Total.** `count` must return a value for any valid UTF-8 input. It must not throw on unusual content (empty strings, lone surrogates repaired to replacement characters, binary-like content). If the content cannot be meaningfully tokenized, the provider returns a best-effort estimate.
 
@@ -670,7 +670,7 @@ The following invariants hold at all times within the tokenization subsystem. An
 | `cl-spec-001` (Segment Model) | Defines `tokenCount` as a core segment field, computed at insertion and recomputed on mutation. Protection tiers and lifecycle operations that trigger counting. |
 | `cl-spec-002` (Quality Model) | Consumes token counts for density scoring. Quality reports include tokenizer accuracy metadata. |
 | `cl-spec-003` (Degradation Patterns) | Saturation pattern activates when utilization exceeds capacity — depends on accurate token accounting. |
-| `cl-spec-007` (API Surface) | Exposes tokenizer configuration, `setTokenizer`, `setCapacity`, and capacity report fields to the caller. |
+| `cl-spec-007` (API Surface) | Exposes tokenizer configuration, `setTokenizer`, `setCapacity`, and capacity report fields to the caller. §12 defines the strict-sequential per-instance invocation contract that scopes tokenizer call ordering — anchored in the §2.1 Pure bullet. |
 | `cl-spec-008` (Eviction Advisory) | Uses token counts for eviction candidate ranking (token cost) and reclamation targets. |
 | `cl-spec-009` (Performance Budget) | Sets latency constraints for token counting operations — informs provider selection guidance. |
 | `cl-spec-010` (Diagnostics) | Consumes cache diagnostics (hit rate, evictions, recounts) and provider metadata for observability. |

@@ -12,7 +12,7 @@
 
 | # | Gap | Status | Where |
 |---|-----|--------|-------|
-| 1 | Concurrency model | open | `cl-spec-007` §11 expansion |
+| 1 | Concurrency model | **done** | `cl-spec-007` §12 (new section) + cross-refs in `cl-spec-005` §2.1, `cl-spec-006` §2.1, `cl-spec-012` Invariant 9 |
 | 2 | Instance disposal (`dispose()`) | **done** | `cl-spec-015` + Phase 6 (T1–T17) |
 | 3 | Fleet serialization | open | extend `cl-spec-012` §8–§10 |
 | 4 | OTel re-attach | open | extend `cl-spec-013` |
@@ -25,7 +25,7 @@
 
 Dependency order from V0_2_0_DESIGN_STRATEGY.md, refreshed for post-Phase-6 state:
 
-1. **Gap 1 — Concurrency** (independent, low coupling, no dependencies on remaining gaps)
+1. ~~**Gap 1 — Concurrency**~~ — **done 2026-05-01.** `cl-spec-007` §12 added; `cl-spec-005` §2.1, `cl-spec-006` §2.1, and `cl-spec-012` Invariant 9 cross-referenced. Spec-only, no code changes. 1116 tests / 39 files / typecheck clean.
 2. **Gap 4 — OTel re-attach** (builds on dispose's `detach()`/integration registry already in code)
 3. **Gap 6 — Memory release** (`clearCaches`/`setCacheSize`/`getMemoryUsage`; cache teardown symmetry with `dispose()` already exists in T8's `clear()` shims)
 4. **Gap 3 — Fleet serialization** (requires Gap 2's dispose semantics — already done)
@@ -40,14 +40,14 @@ These are open questions per V0_2_0_DESIGN_STRATEGY.md that need answers — mos
 
 | Gap | Decision | Recommendation | Status |
 |-----|----------|----------------|--------|
-| 1 | Read-read overlap permitted? | **No** — strict one-in-flight contract | needs confirm |
-| 4 | Exporter binding API: factory-once vs. mutable? | **Mutable** — `detach()`/`attach()` preserves counter/histogram continuity | needs confirm |
-| 4 | Multi-instance fan-in on one exporter? | **No** — one-exporter-one-instance | needs confirm |
-| 5 | Caching strategy (a tighter sampling, b incremental cache, c LSH)? | **(b) with (a) as fallback above N** | **needs explicit pick** |
-| 5 | `similarityCacheSize` default (if option b)? | sized for n≤200, configurable | depends on b |
-| 6 | `getMemoryUsage` precision (exact vs. estimate)? | **Estimate** — cheap, advisory | needs confirm |
-| 6 | `setCacheSize(kind, 0)` permitted? | **Yes** — disables cache, perf documented | needs confirm |
-| 8 | Runtime statement now, verification (test matrix) later? | **Yes** — split spec from CI work | needs confirm |
+| 1 | Read-read overlap permitted? | **No** — strict one-in-flight contract | **applied (Gap 1 shipped)** |
+| 4 | Exporter binding API: factory-once vs. mutable? | **Mutable** — `detach()`/`attach()` preserves counter/histogram continuity | confirmed (per user 2026-05-01) |
+| 4 | Multi-instance fan-in on one exporter? | **No** — one-exporter-one-instance | confirmed (per user 2026-05-01) |
+| 5 | Caching strategy (a tighter sampling, b incremental cache, c LSH)? | **(b) with (a) as fallback above N** | **picked (b) per user 2026-05-01** |
+| 5 | `similarityCacheSize` default (if option b)? | sized for n≤200, configurable | locked-in with (b) |
+| 6 | `getMemoryUsage` precision (exact vs. estimate)? | **Estimate** — cheap, advisory | confirmed (per user 2026-05-01) |
+| 6 | `setCacheSize(kind, 0)` permitted? | **Yes** — disables cache, perf documented | confirmed (per user 2026-05-01) |
+| 8 | Runtime statement now, verification (test matrix) later? | **Yes** — split spec from CI work | confirmed (per user 2026-05-01) |
 
 ---
 
@@ -55,22 +55,23 @@ These are open questions per V0_2_0_DESIGN_STRATEGY.md that need answers — mos
 
 Each block below: scope, design surface, impl surface, test surface, commit estimate, dependencies, blocking decisions.
 
-### Gap 1 — Concurrency model
+### Gap 1 — Concurrency model — DONE (2026-05-01)
 
-**Scope:** Promote the buried single-threaded paragraph in `cl-spec-007` §11 to a dedicated section. Enumerate undefined-behavior zones (overlapping mutations, concurrent `assess()`, overlapping provider calls, re-entrant handlers). Document safe patterns (mutex, actor queue, one-instance-per-worker). State the unsupported scope (`SharedArrayBuffer`, multi-thread shared instance). Add fleet derivation: `assessFleet` is sequential.
+**Shipped on `feat/v0.2-hardening`.** Pure spec amendment, no code changes; 1116 tests / 39 files / typecheck clean.
 
-**Design work** (`cl-spec-007` amendment):
-- New §11.2 "Concurrency and Isolation" (or split out as new §12)
-- One-liner cross-refs in `cl-spec-005` §2 and `cl-spec-006` §2 (sequential provider invocation)
-- `cl-spec-012` §8 invariant: fleet inherits the rule; caller serializes fleet-level ops
+**What landed:**
+- `cl-spec-007` §12 "Concurrency and Isolation" (new top-level section). Subsections: 12.1 strict-sequential contract (read-read overlap **not** permitted, lifecycle-method exemption), 12.2 four undefined-behavior zones (overlapping mutations, concurrent `assess()`, overlapping provider calls, re-entrant handlers), 12.3 safe patterns (mutex, actor queue, one-instance-per-context), 12.4 unsupported configs (multi-thread shared instances, `SharedArrayBuffer` content), 12.5 fleet/exporter derivation.
+- §13 Invariants and §14 References renumbered (was §12/§13). Invariant 6 (Re-entrancy prohibition) updated to cross-ref §12; the buried "Single-threaded access" paragraph removed (content now lives in §12).
+- TOC updated; `concurrency` tag added to frontmatter; revised date 2026-04-29 → 2026-05-01.
+- `cl-spec-005` §2.1 "Thread-safe" bullet rewritten as "Thread-safe across instances" with cross-ref to cl-spec-007 §12. References table gained a cl-spec-007 row.
+- `cl-spec-006` §2.1 "Pure" bullet rewritten with the same cross-ref. References table cl-spec-007 row updated.
+- `cl-spec-012` Invariant 9 added: per-instance sequential access. References table cl-spec-007 row updated.
 
-**Impl work:** None — pure documentation. The contract already matches the implementation.
+**Decision lock applied:** read-read overlap NOT permitted (recommended in this backlog § "Decision locks").
 
-**Test work:** None. (Optional: add a property-based test that asserts re-entrant emit is detected — the warning already exists from the v0.1.0 emitter.)
+**Original scope** (kept here for historical reference):
 
-**Commits:** 1 spec amendment commit.
-**Dependencies:** None.
-**Decisions:** read-read overlap question.
+> Promote the buried single-threaded paragraph in `cl-spec-007` §11 to a dedicated section. Enumerate undefined-behavior zones (overlapping mutations, concurrent `assess()`, overlapping provider calls, re-entrant handlers). Document safe patterns (mutex, actor queue, one-instance-per-worker). State the unsupported scope (`SharedArrayBuffer`, multi-thread shared instance). Add fleet derivation: `assessFleet` is sequential.
 
 ### Gap 3 — Fleet serialization
 
