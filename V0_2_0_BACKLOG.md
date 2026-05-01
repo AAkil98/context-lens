@@ -17,7 +17,7 @@
 | 3 | Fleet serialization | open | extend `cl-spec-012` §8–§10 |
 | 4 | OTel re-attach | **done** | `cl-spec-013` §2.1.3 (new) + Invariants 10/11 + impl spec `I-07-otel-reattach.md` + `attach()` in `src/otel.ts` |
 | 5 | `assess@500` over budget | open | likely new `cl-spec-016` (option-b decision required) |
-| 6 | Memory release | open | amendments to `cl-spec-005`/`006`/`007`/`009` |
+| 6 | Memory release | **done** | `cl-spec-007` §8.9 (new) + `cachesCleared` event + impl spec `I-08-memory-release.md` + LruCache.resize + `clearCaches`/`setCacheSize`/`getMemoryUsage` |
 | 7 | Provider resilience | **deferred** | recommended to v0.3.0 in V0_2_0_DESIGN_STRATEGY.md |
 | 8 | Runtime compatibility statement | open | one-paragraph addition to `cl-spec-009` |
 
@@ -27,7 +27,7 @@ Dependency order from V0_2_0_DESIGN_STRATEGY.md, refreshed for post-Phase-6 stat
 
 1. ~~**Gap 1 — Concurrency**~~ — **done 2026-05-01.** `cl-spec-007` §12 added; `cl-spec-005` §2.1, `cl-spec-006` §2.1, and `cl-spec-012` Invariant 9 cross-referenced. Spec-only, no code changes. 1116 tests / 39 files / typecheck clean.
 2. ~~**Gap 4 — OTel re-attach**~~ — **done 2026-05-01.** `cl-spec-013` §2.1.3 (new subsection) + Invariants 10 (state scope) and 11 (single-instance binding); `impl/I-07-otel-reattach.md`; `ContextLensExporter.attach()` + gauge management refactor in `src/otel.ts`; 9 unit tests + 2 integration tests. 1116 → 1127 tests / 39 → 40 files / typecheck clean.
-3. **Gap 6 — Memory release** (`clearCaches`/`setCacheSize`/`getMemoryUsage`; cache teardown symmetry with `dispose()` already exists in T8's `clear()` shims)
+3. ~~**Gap 6 — Memory release**~~ — **done 2026-05-01.** `cl-spec-007` §8.9 (new section: clearCaches/setCacheSize/getMemoryUsage) + `cachesCleared` event (catalog 25 → 26) + cross-refs in `cl-spec-005` §5.5, `cl-spec-006` §5.6, `cl-spec-009` §6.5; `impl/I-08-memory-release.md`; `LruCache.resize` + per-cache setCacheSize/getEntryCount/getMaxEntries hooks (embedding adds getEntryByteEstimate); 39 new tests (38 unit + 1 integration). 1128 → 1167 tests / 40 files / typecheck clean.
 4. **Gap 3 — Fleet serialization** (requires Gap 2's dispose semantics — already done)
 5. **Gap 5 — `assess@500`** (decision lock first: option a / b / c; if b is chosen, new `cl-spec-016` similarity caching spec needed and interacts with Gap 6's new cache kind)
 6. **Gap 8 — Runtime compatibility statement** (one paragraph; can land any time, ordered last because it depends on the v0.2.0 surface being settled)
@@ -142,27 +142,33 @@ Each block below: scope, design surface, impl surface, test surface, commit esti
 **Dependencies:** Gap 2 (done — informs cache-clear symmetry); Gap 6 (the new cache kind needs `clearCaches` / `setCacheSize` / `getMemoryUsage` coverage).
 **Decisions:** option a/b/c lock, cache size default, invalidation granularity.
 
-### Gap 6 — Memory release
+### Gap 6 — Memory release — DONE (2026-05-01)
 
-**Scope:** Long-lived instances accumulate cache memory up to the configured bounds with no manual release. New methods: `clearCaches(kind?)`, `setCacheSize(kind, size)`, `getMemoryUsage()`.
+**Shipped on `feat/v0.2-hardening`** in 4 commits: spec amendments, impl spec, code, tests.
 
-**Design work** (amendments to `cl-spec-005`/`006`/`007`/`009`):
-- `cl-spec-005` §5 + `cl-spec-006` §5: "Manual Release" subsection
-- `cl-spec-009`: new "Memory Budget" section — worst-case bytes per cache, total cap, long-lived guidance
-- `cl-spec-007` §7 or §8: three new methods documented
-- `cl-spec-007` §9.2: new `cachesCleared` event (catalog 25 → 26)
+**What landed:**
+- `cl-spec-007` §8.9 (new section between §8.8 Eviction Planning and §9 Lifecycle): three subsections — 8.9.1 `clearCaches(kind?)`, 8.9.2 `setCacheSize(kind, size)`, 8.9.3 `getMemoryUsage()`. Per-cache useful-range table, `size = 0` semantics, idempotency boundary, error-throw contract. New `cachesCleared` event in §10.2 with `{ kind, entriesCleared: { tokenizer, embedding, similarity } }` payload — catalog 25 → 26. New `Memory management` row in the API categories table (12 → 13). `'memory'` tag added to frontmatter.
+- `cl-spec-005` §5.5 Manual Release — embedding-cache-specific cross-ref to the §8.9 surface; documents provider-bound rebuild cost on first assess after embedding-cache clear.
+- `cl-spec-006` §5.6 Manual Release — token-cache-specific cross-ref; notes that segment-stored `tokenCount` survives a clearCaches('tokenizer') (count stability invariant).
+- `cl-spec-009` §6.5 Manual Memory Release — replaces the v1-era "no explicit cache-clearing API" sentence with a forward pointer; documents the per-entry byte coefficients used by `getMemoryUsage` (tokenizer 100, similarity 80, embedding `dimensions × 8 + 100` in embedding mode or 8000 in trigram mode), the rebuild-cost table by kind, the `setCacheSize(kind, 0)` use case, and the four-step long-lived-session playbook. Status flipped draft → draft (amended); revised 2026-04-04 → 2026-05-01.
+- `impl/I-08-memory-release.md` — full build plan in the I-06/I-07 format. Module map covers `utils/lru-cache.ts` (resize), the three cache modules (`setCacheSize`/`getEntryCount`/`getMaxEntries`; embedding adds `getEntryByteEstimate`), `events.ts` (event map), `types.ts` (CacheKind/CacheUsage/MemoryUsage), `lifecycle.ts` (READ_ONLY_METHODS 20 → 21), `index.ts` (three public methods + module-level CACHE_KINDS / SETTABLE_CACHE_KINDS sets).
+- `src/utils/lru-cache.ts` — `maxSize` field becomes mutable; new `maxEntries` getter; new `resize(newMaxSize)` method that drops least-recently-used entries on shrink and returns the evicted count. LRU promotion ordering preserved across resizes.
+- `src/tokenizer.ts`, `src/embedding.ts`, `src/similarity.ts` — each gains the same `setCacheSize`/`getEntryCount`/`getMaxEntries` triplet. Embedding adds `getEntryByteEstimate` for the mode-aware byte cost. The internal `cacheSize` shadow field is removed; the LruCache becomes the single source of truth for the bound. Provider-switch paths in all three modules (tokenizer §3.1, embedding setProvider/removeProvider, similarity provider switch) switch from `this.cache = new LruCache(this.cacheSize)` to `this.cache.clear()`, preserving any setCacheSize call the caller made before the switch.
+- `src/index.ts` — `clearCaches(kind?)` validates kind, captures pre-clear entry counts, delegates to each cache's clearCache(), emits one cachesCleared event with the aggregated breakdown. `setCacheSize(kind, size)` rejects 'all' both at TypeScript level (Exclude<>) and runtime (defensive against `as` casts), validates non-negative integer, delegates to the named module. Does NOT emit cachesCleared even when shrinking causes evictions. `getMemoryUsage()` is pure aggregation (Tier 1, no deep copy needed). All three methods include the disposed-state guard.
+- 39 new tests (38 unit + 1 integration). Test floor 1128 → 1167. Decision locks applied: estimate precision for `getMemoryUsage` and `size = 0` permitted for `setCacheSize`.
 
-**Impl work** (`index.ts` + cache modules):
-- `clearCaches(kind?)` — reuses Phase 6's `clearCache()` shims on tokenizer / embedding / similarity / continuity / diagnostics. New thin wrapper at the public API.
-- `setCacheSize(kind, size)` — runtime resize via the existing `LruCache` class (likely needs a new `resize` method on `LruCache` — small unit work)
-- `getMemoryUsage()` — estimate function summing cache `size` × estimated bytes-per-entry; returns object with breakdown
-- New `cachesCleared` event wired through emitter
+**Decision locks applied (per user thumbs-up 2026-05-01):**
+- `getMemoryUsage` precision: estimate (cheap, advisory; ±20% expected error band per cl-spec-009 §6.5).
+- `setCacheSize(kind, 0)` permitted: yes. Disables the named cache; documented per-cache guidance in cl-spec-007 §8.9.2.
 
-**Test work:** ~10 unit + 1 integration case (clear-then-rebuild, resize-shrink-drops-entries, memory-usage-monotonically-decreases-after-clear, cachesCleared event payload).
+**Pitfalls captured (from impl + tests):**
+- `distinctContent` helper used in tests cycles through 10 unique topics; tests needing 30+ unique segments must suffix with the index to avoid the duplicate-detection signal silently no-opping the add.
+- `ContextLens.getSegmentCount()` returns a `number`, not the `{ active, evicted, total }` object cl-spec-007 §8.5 documents. Tests must use the actual return shape; the spec/impl mismatch should be reconciled in a future amendment.
+- Quality report cache is separate from the three derived caches. `clearCaches` does not invalidate it; the next `assess()` returns the cached report unless a mutation has invalidated it. Tests that want a fresh assess after clearCaches must mutate first.
 
-**Commits:** 1 spec, 1 impl-spec, ~5–7 build tasks.
-**Dependencies:** Gap 2 (done) — `dispose()` is the terminal `clearCaches('all')` form. Gap 5 (if option b) — adds a fourth cache kind (similarity) to the kind enum.
-**Decisions:** `getMemoryUsage` precision (estimate), `setCacheSize(kind, 0)` semantics (permit, document perf cost).
+**Original scope** (kept here for historical reference):
+
+> Long-lived instances accumulate cache memory up to the configured bounds with no manual release. New methods: `clearCaches(kind?)`, `setCacheSize(kind, size)`, `getMemoryUsage()`.
 
 ### Gap 8 — Runtime compatibility statement
 
@@ -198,19 +204,19 @@ Per V0_2_0_DESIGN_STRATEGY.md "Non-goals":
 
 ## Total scope estimate
 
-Remaining after Gaps 1 and 4 shipped (2026-05-01):
+Remaining after Gaps 1, 4, and 6 shipped (2026-05-01):
 
 | Surface | Count |
 |---------|------:|
 | Design specs (new) | 0–1 (cl-spec-016 if Gap 5 option b) |
-| Design specs (amended) | 4 remaining (cl-spec-005/006/007/009 for Gap 6; cl-spec-009 for Gap 8; cl-spec-012/014 for Gap 3; cl-spec-002/009 for Gap 5) |
-| Impl specs (new) | 3 remaining (Gap 3, Gap 5, Gap 6 — Gap 8 is spec-only) |
-| Build tasks | ~17–25 across the three remaining impl specs |
-| New unit + integration tests | ~30–55 cases |
+| Design specs (amended) | 3 remaining (cl-spec-009 for Gap 8; cl-spec-012/014 for Gap 3; cl-spec-002/009 for Gap 5) |
+| Impl specs (new) | 2 remaining (Gap 3, Gap 5 — Gap 8 is spec-only) |
+| Build tasks | ~10–17 across the two remaining impl specs |
+| New unit + integration tests | ~20–40 cases |
 | New benchmarks | 1–2 (for Gap 5 cache-warm vs. cache-cold) |
-| Net remaining commits on `feat/v0.2-hardening` | ~25–35 |
+| Net remaining commits on `feat/v0.2-hardening` | ~17–25 |
 
-Done so far on `feat/v0.2-hardening`: 6 commits (Gap 1: 1, Gap 4: 4 + tracking sync from prior turn). Tests grew from 1116 (Phase 6 exit) to 1127 (current).
+Done so far on `feat/v0.2-hardening`: ~12 commits (Gap 1: 1, Gap 4: 5, Gap 6: 4 + tracking sync). Tests grew from 1116 (Phase 6 exit) to 1167 (current).
 
 **Risk-weighted "ship dispose alone as v0.2.0, defer the rest to v0.2.1+v0.3.0" alternative:** still on the table per `SHIPPING.md` revision. The user picked option (2) — bundle — so this plan continues forward.
 
@@ -218,9 +224,9 @@ Done so far on `feat/v0.2-hardening`: 6 commits (Gap 1: 1, Gap 4: 4 + tracking s
 
 ## Recommended next action
 
-**Gap 6 — Memory release.** With the dispose-time `clear()` shims already in place from Phase 6, the surface delta is small: new `clearCaches(kind?)`, `setCacheSize(kind, size)`, `getMemoryUsage()` methods on `ContextLens`; `cachesCleared` event (catalog 25 → 26); spec amendments to `cl-spec-005`/`006`/`007`/`009`. ~5–7 build tasks per the original plan.
+**Gap 3 — Fleet serialization.** `ContextLensFleet.snapshot()` and `static fromSnapshot()` per the backlog's earlier scoping. Self-contained inline format embedding instance snapshots; preserves the fleet's pattern-state cache for event-diffing continuity across restore. ~3 spec amendments + 1 impl spec + ~4–6 build tasks. Now unblocked since Gap 2 (dispose) is done — disposed instances should reject at `fleet.snapshot()` per the spec.
 
-Remaining sequence: Gap 6 → Gap 3 → Gap 5 → Gap 8.
+Remaining sequence: Gap 3 → Gap 5 → Gap 8.
 
 ---
 
