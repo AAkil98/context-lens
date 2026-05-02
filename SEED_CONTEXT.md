@@ -283,7 +283,7 @@ Key decisions made in Spec 16 (Gap 5 of v0.2.0 hardening, 2026-05-02):
 
 ## Current state
 
-**v0.1.0 shipped to npm 2026-04-09. v0.2.0 hardening backlog COMPLETE 2026-05-02 on branch `feat/v0.2-hardening`. Phase 6 (Gap 2 — dispose) shipped 2026-04-30. Gaps 1/4/6 shipped 2026-05-01. Gaps 3/5/8 shipped 2026-05-02 (Gap 5: ~37× speedup on assess@500). Gap 7 deferred to v0.3.0. Test floor 1116 → 1199. Branch is ready to merge into `dev` for v0.2.0 release cut.**
+**v0.1.0 shipped to npm 2026-04-09. v0.2.0 hardening backlog COMPLETE 2026-05-02. v0.2.0 release cut is mid-flight 2026-05-02: feat/v0.2-hardening merged into dev (`9ddf775`), dev merged into main (`40afbcf`), version bumped to 0.2.0 + CHANGELOG expanded (`74d408a`), `dist/` rebuilt, all three branches pushed to origin. `npm publish` and the `v0.2.0` tag are the only remaining release steps — paused because `npm whoami` returned 401 (registry session unauthenticated). Phase 6 (Gap 2 — dispose) shipped 2026-04-30. Gaps 1/4/6 shipped 2026-05-01. Gaps 3/5/8 shipped 2026-05-02 (Gap 5: ~37× speedup on assess@500). Gap 7 deferred to v0.3.0. Test floor 1116 → 1199.**
 
 v0.1.0 baseline:
 - 33/33 build tasks done across 5 phases (~10,200 source LOC, ~15,500 test LOC)
@@ -312,8 +312,9 @@ v0.2.0 hardening backlog (drafted on `feat/v0.2-hardening`, commit `f32822f`):
 - `V0_2_0_BACKLOG.md` — actionable plan covering the remaining 7 gaps from `V0_2_0_DESIGN_STRATEGY.md`
 - Gap 2 (dispose) — done (Phase 6). Gap 1 (concurrency) — **done 2026-05-01** (spec-only amendment to `cl-spec-007` §12 + cross-refs in `cl-spec-005`/`006`/`012`). Gap 4 (OTel re-attach) — **done 2026-05-01** (`cl-spec-013` §2.1.3 + Invariants 10/11; `impl/I-07-otel-reattach.md`; `ContextLensExporter.attach()` + gauge management refactor; 9 unit + 2 integration tests). Gap 6 (memory release) — **done 2026-05-01** (`cl-spec-007` §8.9 + `cachesCleared` event; cross-refs in `cl-spec-005` §5.5, `cl-spec-006` §5.6, `cl-spec-009` §6.5; `impl/I-08-memory-release.md`; `LruCache.resize` + `clearCaches`/`setCacheSize`/`getMemoryUsage`; 38 unit + 1 integration tests). Gap 3 (fleet serialization) — **done 2026-05-02** (`cl-spec-012` §8 + Invariants 10–12; `cl-spec-014` §5 amendment; `impl/I-09-fleet-serialization.md`; `ContextLensFleet.snapshot()` + `static fromSnapshot()`; 13 unit + 3 integration tests). Gap 5 (assess@500 perf) — **done 2026-05-02** (`cl-spec-016` new spec; `cl-spec-002` §3.4 + `cl-spec-009` §3.3 amendments; `impl/I-10-similarity-caching.md`; adaptive `densitySampleCap` + `similarityCacheSize` config; 4 density + 8 config + 3 property tests; **bench: assess@500 ~341 ms → ~9.2 ms, ~37× speedup**). Gap 8 (runtime compat) — **done 2026-05-02** (`cl-spec-009` §1.1 single subsection declaring browser/Deno/Bun/edge compatibility for the core library; OTel exporter remains Node-only; CI matrix verification deferred). Gap 7 (provider resilience) — deferred to v0.3.0
 - Decision locks confirmed 2026-05-01 / 02 — all 8 applied: read-read overlap not permitted (Gap 1); mutable exporter binding (Gap 4); no multi-instance fan-in on exporter (Gap 4); Gap 5 option (b) incremental similarity cache; estimate `getMemoryUsage` (Gap 6); `setCacheSize(kind, 0)` permitted (Gap 6); pattern-state cache preserved across fleet snapshot/restore (Gap 3); runtime statement-now-CI-later split (Gap 8)
-- All v0.2.0 hardening gaps closed. Next: cut v0.2.0 release.
+- All v0.2.0 hardening gaps closed. Release cut mid-flight; only `npm publish` + tag remain.
 - Total scope (final): 1 new design spec (cl-spec-016), 7 amended design specs, 4 new impl specs (I-07/I-08/I-09/I-10), ~22 build commits, +83 tests (1116 → 1199)
+- Merge sequence completed 2026-05-02: feat → dev (merge `9ddf775`, pushed) → main (merge `40afbcf`, pushed) + release commit `74d408a` (package.json 0.1.0 → 0.2.0, CHANGELOG v0.2.0 entry expanded with all six hardening gaps, package-lock.json synced). `dist/` rebuilt; `npm pack --dry-run` clean (748 KB, 29 files). README.md + LICENSE + dist/ + package.json all included. `npm publish` paused at the registry-auth step.
 
 ### Gap 7 (provider resilience) — deferral rationale (revisited 2026-05-02)
 
@@ -369,19 +370,33 @@ v0.2.0 hardening exit (Gaps 1, 3, 4, 5, 6, 8 shipped on `feat/v0.2-hardening` 20
 
 ## What's next
 
-**Resume on `feat/v0.2-hardening` (origin/feat/v0.2-hardening). Open `V0_2_0_BACKLOG.md` for the canonical plan with per-gap scope, decision locks, and commit estimates.**
+**Resume on `main` to finish the v0.2.0 release cut.** All three branches (`feat/v0.2-hardening`, `dev`, `main`) are merged and pushed to origin. The remaining steps are publishing to npm and tagging the release.
 
-Active branch state: `feat/v0.2-hardening` is ~22 commits ahead of `dev` — backlog plan + 1 commit Gap 1 + 5-commit Gap 4 + 4-commit Gap 6 + 4-commit Gap 3 + 4-commit Gap 5 + 1 commit Gap 8 (spec + tracking) + tracking syncs. `dev` carries Phase 6 (merge `0c35bf5`) plus the 4 post-v0.1.0 chore commits previously only on `main`. `main` unchanged. `feat/dispose-lifecycle` preserved on origin for archaeology.
+Active branch state (as of 2026-05-02 mid-flight):
+- `main` (current) — at `74d408a` (release commit). 0 commits ahead of origin. Working tree clean. `package.json` is at 0.2.0. `dist/` is built and ready for publish (748 KB / 29 files / 3.5 MB unpacked per `npm pack --dry-run`).
+- `dev` — at `9ddf775` (merge of feat into dev). Pushed. Reserved for v0.3.0 development.
+- `feat/v0.2-hardening` — at `03c9c96`. Pushed. Can stay around for archaeology or be deleted after v0.2.0 ships.
+- `feat/dispose-lifecycle` — preserved on origin for archaeology (final commit `b565e3a`).
 
-**v0.2.0 hardening backlog COMPLETE.** All gaps closed except Gap 7 (provider resilience), which is deliberately deferred to v0.3.0. The branch is ready to merge into `dev` for the v0.2.0 release cut.
+**Sanity-check before resuming:**
+1. `git checkout main && git status` — should be clean and at `74d408a`.
+2. `git log --oneline -5` — top three commits should be `74d408a` (release), `40afbcf` (merge dev), `9ddf775` (merge feat into dev).
+3. `cat package.json | head -3` — version should be `"0.2.0"`.
+4. `head -3 CHANGELOG.md` — should show `## 0.2.0 — Instance lifecycle and hardening (2026-05-02)`.
+5. `ls dist/` — should have the rebuilt `index.{cjs,mjs,d.ts,d.cts}`, `fleet.*`, `otel.*`, `schemas/index.*` files. If absent or stale, re-run `npm run build` before publishing.
+6. `npm view @madahub/context-lens version` — should still report `0.1.0` (confirms the publish hasn't happened yet).
+7. `npm whoami` — must succeed before publish. If it returns 401, run `npm login` first (interactive web flow or token-based depending on setup).
 
-**Recommended next moves (release sequence):**
-1. Merge `feat/v0.2-hardening` into `dev`. Push.
-2. Final test + bench + typecheck sweep on `dev`.
-3. Merge `dev` into `main`. Push.
-4. Version bump `package.json` 0.1.0 → 0.2.0.
-5. Update `CHANGELOG.md` with the v0.2.0 entry — content sourced from the per-gap "DONE" blocks in `V0_2_0_BACKLOG.md`.
-6. `npm publish` from `main`. Tag `v0.2.0`. Push tag.
+**Remaining release steps (publish + tag):**
+1. `npm login` — authenticate to the npm registry. Account needs publish rights to `@madahub`.
+2. `npm publish --access public` — publishes the 0.2.0 tarball. Will prompt for OTP if 2FA is enabled. **Irreversible** — cannot republish the same version, and unpublish is blocked by registry policy after 24 hours.
+3. `git tag -a v0.2.0 -m "v0.2.0 — Instance lifecycle and hardening"` — annotated tag at `74d408a` (the release commit). Use a longer message body with the surface deltas if you want richer release notes.
+4. `git push origin v0.2.0` — pushes the tag to GitHub. Triggers any tag-based CI/release workflows the repo has (none configured at v0.1.0 time, but worth verifying).
+5. (Optional) Create a GitHub release from the tag. The CHANGELOG.md v0.2.0 entry is the canonical source for the release notes body.
+
+After v0.2.0 is published:
+- Switch back to `dev` for v0.3.0 development. The first v0.3.0 task is likely **Gap 7 (provider resilience)** — see the "Gap 7 — deferral rationale" section in `V0_2_0_BACKLOG.md` for context. The library currently delegates retry to providers per cl-spec-005 §2.6 / cl-spec-006 §2.4; Gap 7 would invert that. Land it when a consumer reports flakiness in production OR when there's a deliberate decision to add a circuit-breaker layer.
+- Other v0.3.0 candidates from `SHIPPING.md`: tiktoken adapter package, OpenAI embeddings adapter package, runtime CI matrix verification (Gap 8 follow-up).
 
 v0.2.0 surface deltas vs v0.1.0:
 - New methods: `dispose`, `clearCaches`, `setCacheSize`, `getMemoryUsage`, `ContextLensFleet.snapshot`, `static ContextLensFleet.fromSnapshot`, `ContextLensExporter.attach`
@@ -394,7 +409,7 @@ v0.2.0 surface deltas vs v0.1.0:
 - Bench: `assess@500` ~341 ms → ~9.2 ms (~37×)
 - Test floor: 1116 → 1199 (+83 tests, +6 test files)
 
-See `SHIPPING.md` for the v0.2.0 / v0.3.0 release plan (revised 2026-04-30 to reflect Phase 6 completion and the bundle-vs-cut decision).
+See `SHIPPING.md` for the v0.2.0 / v0.3.0 release plan (revised 2026-04-30 to reflect Phase 6 completion and the bundle-vs-cut decision; the bundle decision was honored — all hardening gaps shipped together with Phase 6 in v0.2.0).
 
 ## Design review history
 
@@ -455,28 +470,31 @@ Key technology decisions: TypeScript strict mode, tsup for ESM+CJS dual build, v
 
 ## Files to read on pickup
 
-Resuming on `feat/v0.2-hardening` for the v0.2.0 release cut:
+Resuming on `main` to publish v0.2.0:
 
-1. `V0_2_0_BACKLOG.md` — final state of the hardening backlog. All 8 gaps closed (Gap 7 deferred to v0.3.0). The per-gap "DONE" blocks are the source for the v0.2.0 CHANGELOG entry. Read the "Recommended next action" section for the release sequence.
-2. `SHIPPING.md` — v0.2.0 release plan. Reconcile against the actual landed surface before publishing (the bundle vs. cut question is settled — bundled the full backlog).
-3. `CHANGELOG.md` — v0.1.0 entry exists; the v0.2.0 entry is unwritten. Draft it from the per-gap "DONE" blocks in `V0_2_0_BACKLOG.md` plus the surface delta enumeration above.
-4. `V0_2_0_DESIGN_STRATEGY.md` — original 8-gap design analysis. Useful background only; the backlog is the canonical actionable plan.
+1. `CHANGELOG.md` — v0.2.0 entry already drafted. Top of file. Use it as-is for the npm release notes / GitHub release body.
+2. `V0_2_0_BACKLOG.md` — final state of the hardening backlog with all per-gap "DONE" blocks. Background context for the release; not strictly needed to publish.
+3. `SHIPPING.md` — v0.2.0 / v0.3.0 release plan. Cross-check the actual landed surface against the plan before publishing. (Bundle decision was honored.)
+4. `V0_2_0_DESIGN_STRATEGY.md` — original 8-gap design analysis. Useful only if you're starting v0.3.0 immediately and need to revisit Gap 7 / adapter packages.
 
-Recommended release-cut order (from the "What's next" section above):
-1. Run `npm run typecheck && npm test && npm run bench` once more on `feat/v0.2-hardening` — confirm the 1199 hard floor and the assess@500 ~9 ms regression sentinel.
-2. Push `feat/v0.2-hardening` to origin (currently 22 commits ahead).
-3. Merge into `dev`. Push `dev`.
-4. Final sweep on `dev` (typecheck + tests + bench).
-5. Merge `dev` into `main`. Push `main`.
-6. Bump `package.json` 0.1.0 → 0.2.0. Commit on `main`.
-7. Draft + commit the v0.2.0 `CHANGELOG.md` entry. Pull content from `V0_2_0_BACKLOG.md` per-gap "DONE" blocks.
-8. `npm publish` from `main`. Tag `v0.2.0`. Push tag.
+Recommended pickup sequence (publish-only handoff):
+1. Run the seven sanity checks in the "What's next" section above (`git status`, `package.json` version, `dist/` contents, `npm view ... version`, `npm whoami`).
+2. If `dist/` is missing or stale, run `npm run build` (no source changes since the last build, so this should be a no-op rebuild).
+3. `npm login` (if `npm whoami` returned 401).
+4. `npm publish --access public`.
+5. `git tag -a v0.2.0 -m "v0.2.0 — Instance lifecycle and hardening"`.
+6. `git push origin v0.2.0`.
 
-Branch and remote state (as of 2026-05-02):
-- `feat/v0.2-hardening` (active) — 22 commits ahead of `dev`. v0.2.0 hardening complete. **Not yet pushed to origin** — `git push` is the first release-cut step.
-- `dev` — Phase 6 merged via `0c35bf5`. Awaiting `feat/v0.2-hardening` merge.
+Branch and remote state (as of 2026-05-02 mid-flight):
+- `main` (current) — at `74d408a`. Pushed to origin. v0.2.0 release commit on top.
+- `dev` — at `9ddf775`. Pushed.
+- `feat/v0.2-hardening` — at `03c9c96`. Pushed. Optional cleanup target after v0.2.0 ships.
 - `feat/dispose-lifecycle` — preserved on origin for archaeology (final commit `b565e3a`).
-- `main` — unchanged at v0.1.0.
+
+Build artifacts and publish manifest:
+- `dist/` is built for 0.2.0. 3.4 MB total on disk; 748 KB packed by npm.
+- `npm pack --dry-run` includes: `dist/{fleet,index,otel,schemas/index}.{cjs,mjs,d.ts,d.cts}` + the corresponding `.map` files + `LICENSE` + `README.md` + `package.json`. 29 files total.
+- Peer dependency `@opentelemetry/api ^1.0.0` declared optional. Engines: `node >= 18`.
 
 v0.2.0 reference (everything that landed across Phases 6–10):
 - `specs/15-instance-lifecycle.md` — Phase 6 design spec
