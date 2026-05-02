@@ -269,6 +269,18 @@ Grill outcomes (2026-04-29) — three decisions applied to the spec; status flip
 - Post-grill addendum (during impl-spec drafting): `instanceId: string` added as a fourth always-valid public surface. Generated once at construction, returned unchanged across live/disposing/disposed states, never throws. Same value as the `stateDisposed` event payload, `DisposedError.instanceId`, and integration teardown notifications. Canonical correlation key for cross-system telemetry. Documented in cl-spec-015 §2.5 and Invariant 15, and in cl-spec-007 §9.4. Adds one slot to the disposed-state-guard exemption list across both specs.
 - `revised:` frontmatter updated to 2026-04-29.
 
+**Spec 16 (Similarity Caching & Sampling) is draft:** `specs/16-similarity-caching.md`
+
+Key decisions made in Spec 16 (Gap 5 of v0.2.0 hardening, 2026-05-02):
+- Coordinating spec spanning cl-spec-002, cl-spec-005, cl-spec-007, cl-spec-009. Resolves the v0.1.0 `assess@500 over budget` known issue (~340 ms vs 50 ms target) through two orthogonal mechanisms: incremental similarity cache (option b) and adaptive sampling (option a, fallback above N).
+- §2 Incremental Similarity Cache — `defaultSimilarityCacheSize(capacity) = clamp(sqrt(capacity/200) × 16384, 16384, 65536)`. At typical 128k capacity, default is 65,536 entries (was 16,384). Existing invalidation hooks preserved; the contribution is sizing.
+- §3 Adaptive Sampling — `densitySampleCap(n)` step function: 30 ≤ 300 → 15 ≤ 500 → 10. Topical concentration's `sqrt(n) × 3` formula unchanged (already sub-linear).
+- §4 Cache-Warm vs Cache-Cold Determinism — the load-bearing invariant. Cache state never influences scores; the cache is a memoization layer, not a different scoring path. Sampling RNG seed unchanged across cache states.
+- §5 Configuration — new `similarityCacheSize` constructor option (synonym for `setCacheSize('similarity', N)` from cl-spec-007 §8.9.2). Snapshot/restore preserves; 0 disables.
+- §6 Performance Targets — assess@500 cache-warm <50 ms (Tier 3 budget); cache-cold ≤200 ms (relaxed from ~340 ms baseline by sampling); cache-disabled ≤500 ms bounded.
+- 10 invariants including cache-warm/cache-cold output equality, sampling determinism preserved, default scaling monotonic + bounded, adaptive sampling monotonic + continuity-preserving at thresholds.
+- Bench delta verified post-implementation: assess@500 ~341 ms → ~9.2 ms (~37× speedup).
+
 ## Current state
 
 **v0.1.0 shipped to npm 2026-04-09. v0.2.0 hardening backlog COMPLETE 2026-05-02 on branch `feat/v0.2-hardening`. Phase 6 (Gap 2 — dispose) shipped 2026-04-30. Gaps 1/4/6 shipped 2026-05-01. Gaps 3/5/8 shipped 2026-05-02 (Gap 5: ~37× speedup on assess@500). Gap 7 deferred to v0.3.0. Test floor 1116 → 1199. Branch is ready to merge into `dev` for v0.2.0 release cut.**
@@ -303,6 +315,16 @@ v0.2.0 hardening backlog (drafted on `feat/v0.2-hardening`, commit `f32822f`):
 - All v0.2.0 hardening gaps closed. Next: cut v0.2.0 release.
 - Total scope (final): 1 new design spec (cl-spec-016), 7 amended design specs, 4 new impl specs (I-07/I-08/I-09/I-10), ~22 build commits, +83 tests (1116 → 1199)
 
+### Gap 7 (provider resilience) — deferral rationale (revisited 2026-05-02)
+
+User pushed back on the deferral with "Why not fix Gap 7 now?". Three reasons were laid out for keeping it deferred and the user accepted:
+
+1. **The current spec actively delegates retry to the provider.** cl-spec-005 §2.6 and cl-spec-006 §2.4 explicitly say *"context-lens does not retry. Retry strategy is the provider's responsibility."* A circuit breaker would invert that boundary — moving retry/backoff logic into the library that the spec just said belonged outside it. Adding Gap 7 is a contract change, not a hardening.
+2. **No failure-mode evidence to design against.** Without a real consumer report — "OpenAI 429s for 5 minutes broke my agent" — failure thresholds, backoff curves, and recovery checks are guesses. A circuit breaker that fires too aggressively (or not aggressively enough) is worse than no circuit breaker because callers stop trusting it.
+3. **The substrate is mature, so deferring is cheap.** Phase 6's integration registry and `dispose()` give a clean attachment point. v0.3.0 can land Gap 7 in 4–5 commits when a consumer hits the failure mode. Doing it on demand anchors the design in real failure data.
+
+If a future session revisits this question without new evidence, the same three reasons apply. If a consumer reports provider flakiness, the failure mode they describe IS the design input — at that point Gap 7 should land in v0.2.x or v0.3.0 rather than wait further.
+
 ### What's built
 
 | Phase | Status | Modules |
@@ -313,12 +335,18 @@ v0.2.0 hardening backlog (drafted on `feat/v0.2-hardening`, commit `f32822f`):
 | 4 — Public API & Diagnostics | **Complete** | ContextLens class (constructor, 8 segment ops, 4 group ops, task ops, assess, planEviction, provider mgmt, capacity), diagnostics (history, trends, timeline, warnings), formatters (3 pure functions) |
 | 5 — Enrichments | **Complete** | schemas (JSON Schema draft 2020-12, toJSON, validate), serialization (snapshot/fromSnapshot, format versioning, provider change detection), fleet (ContextLensFleet, assessFleet, aggregation, fleet events), OTel (ContextLensExporter, 9 gauges, 6 counters, 1 histogram, 5 log events) |
 | 6 — Instance Lifecycle (v0.2.0) | **Complete (T1–T17)** | `lifecycle.ts` (IntegrationRegistry, READ_ONLY_METHODS, guardDispose, runTeardown), `errors.ts` (DisposedError + DisposalError + tagOrigin/isHandlerOriginTag helpers), `events.ts` (stateDisposed event → 25 events, emitCollect, removeAllListeners), `types.ts` (Lifecycle Domain), internal `clear()` shims (tokenizer, continuity, diagnostics, segment-store), `index.ts` (instanceId, isDisposed, isDisposing, attachIntegration, dispose() body, 38 guards), fleet auto-unregister with instanceDisposed event, OTel auto-disconnect with context_lens.instance.disposed log event |
+| 7 — OTel re-attach (v0.2.0 Gap 4) | **Complete** | `otel.ts` ContextLensExporter.attach() + gauge management refactor (preserves gauge identity across detach/attach cycles via `gauges` registry; instance + integrationHandle made nullable; commonAttributes guard for null instance); state-scope contract: counters preserved, histogram preserved, gauges reset |
+| 8 — Memory Release (v0.2.0 Gap 6) | **Complete** | `utils/lru-cache.ts` resize() + maxEntries getter; `tokenizer.ts`/`embedding.ts`/`similarity.ts` setCacheSize/getEntryCount/getMaxEntries (embedding adds getEntryByteEstimate); `events.ts` cachesCleared event (catalog 25 → 26); `types.ts` CacheKind/CacheUsage/MemoryUsage; `index.ts` clearCaches/setCacheSize/getMemoryUsage with CACHE_KINDS/SETTABLE_CACHE_KINDS validation sets; READ_ONLY_METHODS 20 → 21 |
+| 9 — Fleet Serialization (v0.2.0 Gap 3) | **Complete** | `fleet.ts` ContextLensFleet.snapshot() + static fromSnapshot() with per-label RestoreConfig dispatch; FLEET_FORMAT_VERSION constant ('context-lens-fleet-snapshot-v1'); FleetRestoreConfig interface; `types.ts` SerializedFleet + 5 supporting types (FleetTrackingState, FleetState, SerializedFleetInstance, FleetSnapshotOptions); pattern-state cache preservation across restore (Invariant 10) |
+| 10 — Similarity Caching & Sampling (v0.2.0 Gap 5) | **Complete** | `density.ts` densitySampleCap(n) step function replacing fixed UNCACHED_SAMPLE_CAP; `index.ts` similarityCacheSize ContextLensConfig field + defaultSimilarityCacheSize formula (clamp(sqrt(capacity/200)×16384, 16384, 65536)); `types.ts` SerializedConfig.similarityCacheSize for snapshot round-trip; cache-warm/cache-cold determinism property test (Invariant 1) |
 
 ### Test coverage
 
 Phase 5 exit (v0.1.0 baseline): **977 tests** across 36 test files + 12 benchmarks.
 
 Phase 6 exit (v0.2.0 dispose, merged into `dev` 2026-04-30): **1116 tests** across 39 test files + 16 benchmark cases. Net additions in Phase 6: new `test/unit/lifecycle.test.ts` (41 cases), new `test/integration/lifecycle.test.ts` (15 flows from impl-spec §5), new `test/property/lifecycle.test.ts` (4 fast-check properties + 3 sanity checks), new `test/bench/lifecycle.bench.ts` (4 cases — `dispose-empty`, `dispose-500`, two `guardDispose` variants); +15 in `errors.test.ts`, +21 in `events.test.ts`, +29 in `context-lens.test.ts`, +10 in `fleet.test.ts`, +8 in `otel.test.ts`, +10 across `tokenizer`/`continuity`/`diagnostics`/`segment-store`. Hard floor (977) held at every commit through T11–T17.
+
+v0.2.0 hardening exit (Gaps 1, 3, 4, 5, 6, 8 shipped on `feat/v0.2-hardening` 2026-05-01 / 02): **1199 tests** across 42 test files + 16 benchmark cases. Net additions across the four hardening phases: Gap 4 (Phase 7) +9 unit + 2 integration in `test/unit/otel.test.ts` (new "Re-attach" describe block) and new `test/integration/otel-reattach.test.ts`; Gap 6 (Phase 8) +5 in `test/unit/utils/lru-cache.test.ts`, +3 each in tokenizer/embedding/similarity, +2 in `events.test.ts`, +19 in `context-lens.test.ts` ("Memory management" describe), +1 integration; Gap 3 (Phase 9) +13 in `test/unit/fleet.test.ts` ("Serialization" describe), +3 in new `test/integration/fleet.test.ts`; Gap 5 (Phase 10) +4 in `test/unit/scoring/density.test.ts` (densitySampleCap step), +8 in `context-lens.test.ts` ("similarityCacheSize config" describe), +3 in new `test/property/similarity-determinism.test.ts`. Hard floor (1116) held at every commit. Bench delta: `assess @ 500` ~341 ms → ~9.2 ms (~37×).
 
 ### Key architecture decisions made during implementation
 
@@ -335,8 +363,9 @@ Phase 6 exit (v0.2.0 dispose, merged into `dev` 2026-04-30): **1116 tests** acro
 
 | Issue | Severity | Notes |
 |-------|----------|-------|
-| Baseline not wired | Low | `BaselineManager.notifyAdd()` never called from `captureBaseline()`. Scores work correctly without it (raw scores used). Fix before v0.1.0. |
-| assess@500 over budget | Low | O(n^2) similarity at 500 segments takes ~300ms vs 50ms budget. Sampling mitigates in practice. v0.2.0 hardening backlog Gap 5. |
+| Baseline not wired | Low | `BaselineManager.notifyAdd()` never called from `captureBaseline()`. Scores work correctly without it (raw scores used). Carryover from v0.1.0 — not addressed in v0.2.0 hardening; resolve in a future patch. |
+| ~~assess@500 over budget~~ | ~~Low~~ | **Resolved 2026-05-02 (Gap 5).** Bench: ~341 ms → ~9.2 ms via `cl-spec-016` adaptive sampling + larger default similarity cache. |
+| `getSegmentCount()` return shape | Low | Spec (cl-spec-007 §8.5) documents `{ active, evicted, total }` but implementation returns a plain `number`. Discovered during Gap 6 testing 2026-05-01. Reconcile in a future amendment — pick spec-side change (impl wins) or impl-side change (spec wins) based on which downstream consumers expect. No production failure mode. |
 
 ## What's next
 
@@ -409,7 +438,7 @@ Four sweeps executed across 14 specs. 26 findings (R-165 through R-190). Key res
 
 **Implementation specs: COMPLETE (2026-04-06)**
 
-5 documents, 2,161 lines total, covering 5 build phases and ~30 modules:
+5 documents for v0.1.0 (~2,161 lines) + 5 additional v0.2.0 documents (~1,800 lines) covering Phases 6–10 and ~10 additional/modified modules:
 
 - `IMPLEMENTATION.md` — strategy document (tech stack: TypeScript/tsup/vitest, single package with sub-path exports, zero runtime deps for core) + Phase 1 inline (foundation: types, errors, events, utils, segment-store, tokenizer)
 - `impl/I-02-scoring-engine.md` — Phase 2: similarity engine, embedding subsystem, task identity, 4 dimension scorers, baseline, composite, quality report assembly (10 modules, most complex phase)
@@ -417,40 +446,57 @@ Four sweeps executed across 14 specs. 26 findings (R-165 through R-190). Key res
 - `impl/I-04-api-integration.md` — Phase 4: ContextLens class (integration layer), diagnostics, formatters (3 modules)
 - `impl/I-05-enrichments.md` — Phase 5: JSON Schema, serialization, fleet monitor, OTel export (4 modules, all optional)
 - `impl/I-06-lifecycle.md` — Phase 6 (v0.2.0): `dispose()`, `isDisposed`/`isDisposing`, `stateDisposed` event, `DisposedError`/`DisposalError`, `IntegrationRegistry`, fleet auto-unregister, OTel auto-disconnect. New module `lifecycle.ts` plus modifications to `errors`, `events`, `index`, `fleet`, `otel`.
+- `impl/I-07-otel-reattach.md` — Phase 7 (v0.2.0 Gap 4): `ContextLensExporter.attach()`, gauge management refactor for detach/attach cycles, state-scope contract (counters/histogram preserved, gauges reset).
+- `impl/I-08-memory-release.md` — Phase 8 (v0.2.0 Gap 6): `clearCaches`/`setCacheSize`/`getMemoryUsage`, `cachesCleared` event, `LruCache.resize`, per-cache memory hooks.
+- `impl/I-09-fleet-serialization.md` — Phase 9 (v0.2.0 Gap 3): `ContextLensFleet.snapshot()` + `static fromSnapshot()`, FleetRestoreConfig with per-label dispatch, pattern-state cache preservation.
+- `impl/I-10-similarity-caching.md` — Phase 10 (v0.2.0 Gap 5): adaptive `densitySampleCap(n)`, `similarityCacheSize` config + capacity-scaling default formula, cache-warm/cache-cold determinism contract.
 
 Key technology decisions: TypeScript strict mode, tsup for ESM+CJS dual build, vitest + fast-check for testing (unit, integration, property-based, benchmarks), `@opentelemetry/api` as sole peer dep (OTel entry point only).
 
 ## Files to read on pickup
 
-Resuming v0.2.0 hardening on `feat/v0.2-hardening`:
+Resuming on `feat/v0.2-hardening` for the v0.2.0 release cut:
 
-1. `V0_2_0_BACKLOG.md` — **canonical post-Phase-6 plan** for the remaining 7 v0.2.0 gaps. Read this first. Contains per-gap scope, decision locks, dependency order, and commit estimates.
-2. `V0_2_0_DESIGN_STRATEGY.md` — the original 8-gap design analysis (2026-04 draft) that the backlog supersedes for sequencing. Useful for the deeper rationale on each gap and for the "Open questions" subsections per gap.
-3. `IMPL_JOURNAL.md` — Phase 6 task tracker (T1–T17 all done). Read for per-task notes, deviations, decision rationale, and commit hashes — useful when the v0.2 hardening work touches modules Phase 6 introduced.
-4. `SHIPPING.md` — v0.2.0 release plan, revised 2026-04-30. Currently flags the bundle-vs-cut question (ship dispose alone as v0.2.0 vs. bundle the rest); user picked bundle.
-5. `CHANGELOG.md` — v0.2.0 entry (above the v0.1.0 entry) lists every Phase 6 surface addition.
+1. `V0_2_0_BACKLOG.md` — final state of the hardening backlog. All 8 gaps closed (Gap 7 deferred to v0.3.0). The per-gap "DONE" blocks are the source for the v0.2.0 CHANGELOG entry. Read the "Recommended next action" section for the release sequence.
+2. `SHIPPING.md` — v0.2.0 release plan. Reconcile against the actual landed surface before publishing (the bundle vs. cut question is settled — bundled the full backlog).
+3. `CHANGELOG.md` — v0.1.0 entry exists; the v0.2.0 entry is unwritten. Draft it from the per-gap "DONE" blocks in `V0_2_0_BACKLOG.md` plus the surface delta enumeration above.
+4. `V0_2_0_DESIGN_STRATEGY.md` — original 8-gap design analysis. Useful background only; the backlog is the canonical actionable plan.
 
-Branch and remote state:
-- `feat/v0.2-hardening` (active) — 1 commit ahead of `dev` (the backlog plan `f32822f`)
-- `dev` — Phase 6 merged via `0c35bf5`; pushed to origin
-- `feat/dispose-lifecycle` — preserved on origin for archaeology (final commit `b565e3a`)
-- `main` unchanged (`614089c`)
+Recommended release-cut order (from the "What's next" section above):
+1. Run `npm run typecheck && npm test && npm run bench` once more on `feat/v0.2-hardening` — confirm the 1199 hard floor and the assess@500 ~9 ms regression sentinel.
+2. Push `feat/v0.2-hardening` to origin (currently 22 commits ahead).
+3. Merge into `dev`. Push `dev`.
+4. Final sweep on `dev` (typecheck + tests + bench).
+5. Merge `dev` into `main`. Push `main`.
+6. Bump `package.json` 0.1.0 → 0.2.0. Commit on `main`.
+7. Draft + commit the v0.2.0 `CHANGELOG.md` entry. Pull content from `V0_2_0_BACKLOG.md` per-gap "DONE" blocks.
+8. `npm publish` from `main`. Tag `v0.2.0`. Push tag.
 
-Phase 6 reference (everything that landed):
-- `specs/15-instance-lifecycle.md` — design spec; source of truth for behavior
-- `impl/I-06-lifecycle.md` — Phase 6 build plan (570 lines, amended in T2 + T6 with `emitCollect` contract and audited 20-name READ_ONLY_METHODS set)
-- `src/lifecycle.ts` — IntegrationRegistry, READ_ONLY_METHODS, guardDispose, runTeardown
-- `src/errors.ts` — DisposedError, DisposalError, tagOrigin/isHandlerOriginTag
-- `src/events.ts` — stateDisposed event, emitCollect, removeAllListeners
-- `src/index.ts` — dispose() body, instanceId, isDisposed/isDisposing getters, attachIntegration, 38 guards on the public surface
-- `src/fleet.ts` — register handshake, unregister handle detach, handleInstanceDisposal callback, instanceDisposed event
-- `src/otel.ts` — constructor handshake, disconnect refactor, handleInstanceDisposal with context_lens.instance.disposed log
+Branch and remote state (as of 2026-05-02):
+- `feat/v0.2-hardening` (active) — 22 commits ahead of `dev`. v0.2.0 hardening complete. **Not yet pushed to origin** — `git push` is the first release-cut step.
+- `dev` — Phase 6 merged via `0c35bf5`. Awaiting `feat/v0.2-hardening` merge.
+- `feat/dispose-lifecycle` — preserved on origin for archaeology (final commit `b565e3a`).
+- `main` — unchanged at v0.1.0.
+
+v0.2.0 reference (everything that landed across Phases 6–10):
+- `specs/15-instance-lifecycle.md` — Phase 6 design spec
+- `specs/16-similarity-caching.md` — Gap 5 / Phase 10 design spec (NEW in v0.2.0)
+- `impl/I-06-lifecycle.md` through `impl/I-10-similarity-caching.md` — per-phase build plans
+- `src/lifecycle.ts` (Phase 6) — internal infrastructure
+- `src/errors.ts` — DisposedError, DisposalError (Phase 6); ConfigurationError used widely
+- `src/events.ts` — stateDisposed (Phase 6), cachesCleared (Phase 8) — catalog 24 → 26
+- `src/index.ts` — dispose / lifecycle getters / instanceId / attachIntegration (Phase 6); clearCaches / setCacheSize / getMemoryUsage (Phase 8); similarityCacheSize config + defaultSimilarityCacheSize formula (Phase 10)
+- `src/fleet.ts` — register handshake / auto-unregister / instanceDisposed event (Phase 6); snapshot / static fromSnapshot / FleetRestoreConfig (Phase 9)
+- `src/otel.ts` — constructor handshake / handleInstanceDisposal / context_lens.instance.disposed log (Phase 6); attach() + gauge management refactor (Phase 7)
+- `src/scoring/density.ts` — densitySampleCap step function (Phase 10)
+- `src/utils/lru-cache.ts` — resize() + maxEntries getter (Phase 8)
+- `src/types.ts` — Lifecycle Domain (Phase 6); Memory Management Domain (Phase 8); Fleet Serialization Domain (Phase 9); SerializedConfig.similarityCacheSize (Phase 10)
 
 Specs/design references (authoritative behavioral source):
-- `specs/01-segment-model.md` through `specs/15-instance-lifecycle.md` — design specs
+- `specs/01-segment-model.md` through `specs/16-similarity-caching.md` — design specs (16 specs total at v0.2.0)
 - `specs/README.md` — index + the original "Open questions and known gaps" list that drove `V0_2_0_DESIGN_STRATEGY.md`
-- `IMPLEMENTATION.md` — strategy document; §5 Phase 6 row marked complete
-- `impl/I-02-scoring-engine.md` through `impl/I-06-lifecycle.md` — per-phase impl specs
+- `IMPLEMENTATION.md` — strategy document; Phase 6 row marked complete
+- `impl/I-02-scoring-engine.md` through `impl/I-10-similarity-caching.md` — per-phase impl specs
 
 **Archived:** `REVIEW.md` and `REVIEW_FINDINGS.md` exported to `../archive/context-lens-REVIEW.md` and `../archive/context-lens-REVIEW_FINDINGS.md`
 **Removed:** `IMPL_JOURNAL.md` (build tracker, superseded — all 33 tasks done) and `TEST_STRATEGY.md` (testing uplift plan, superseded — all 5 phases complete)
