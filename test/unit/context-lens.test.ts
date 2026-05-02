@@ -12,6 +12,8 @@ import {
   ProtectionError,
   CompactionError,
   RestoreError,
+  DisposedError,
+  DisposalError,
 } from '../../src/errors.js';
 import type {
   Segment,
@@ -1192,5 +1194,582 @@ describe('ContextLens — Cache Invalidation After Mutations', () => {
     const r2 = lens.assess();
     expect(r2.capacity.capacity).toBe(20000);
     expect(r2.reportId).not.toBe(r1.reportId);
+  });
+});
+
+// ─── Lifecycle surface (cl-spec-015 §2.5, §6.2) ────────────────────
+
+describe('Lifecycle surface', () => {
+  it('instanceId matches the documented cl-N-xxxxxx format', () => {
+    const lens = makeLens();
+    expect(lens.instanceId).toMatch(/^cl-\d+-[a-z0-9]+$/);
+  });
+
+  it('two instances get distinct instanceIds', () => {
+    const a = makeLens();
+    const b = makeLens();
+    expect(a.instanceId).not.toBe(b.instanceId);
+  });
+
+  it('instanceId is stable across reads', () => {
+    const lens = makeLens();
+    const first = lens.instanceId;
+    expect(lens.instanceId).toBe(first);
+    expect(lens.instanceId).toBe(first);
+  });
+
+  it('isDisposed returns false on a fresh instance', () => {
+    expect(makeLens().isDisposed).toBe(false);
+  });
+
+  it('isDisposing returns false on a fresh instance', () => {
+    expect(makeLens().isDisposing).toBe(false);
+  });
+
+  it('isDisposed and isDisposing are never simultaneously true on a live instance', () => {
+    const lens = makeLens();
+    expect(lens.isDisposed && lens.isDisposing).toBe(false);
+  });
+
+  it('attachIntegration returns a handle with an idempotent detach()', () => {
+    const lens = makeLens();
+    const handle = lens.attachIntegration(() => {});
+    expect(typeof handle.detach).toBe('function');
+    expect(() => {
+      handle.detach();
+      handle.detach();
+    }).not.toThrow();
+  });
+
+  it('attachIntegration on a live instance does not throw', () => {
+    const lens = makeLens();
+    expect(() => lens.attachIntegration(() => {})).not.toThrow();
+  });
+});
+
+// ─── Disposed-state guard wiring (cl-spec-015 §3.4, §5.1) ──────────
+//
+// T10 wires guardDispose into every public method but the live path is
+// unchanged. These tests force the lifecycle state via a private-field
+// cast to verify the guard arms correctly. T11 will exercise the same
+// behavior through the real dispose() method, and T15 covers exhaustive
+// post-disposal property-based coverage.
+
+describe('Disposed-state guard wiring', () => {
+  function forceState(lens: ContextLens, state: 'disposed' | 'disposing'): void {
+    (lens as unknown as { lifecycleState: string }).lifecycleState = state;
+  }
+
+  it('mutating methods throw DisposedError when state is "disposed"', () => {
+    const lens = makeLens();
+    forceState(lens, 'disposed');
+    expect(() => lens.add('x')).toThrow(DisposedError);
+    expect(() => lens.setCapacity(5000)).toThrow(DisposedError);
+    expect(() => lens.on('segmentAdded', () => {})).toThrow(DisposedError);
+    expect(() => lens.attachIntegration(() => {})).toThrow(DisposedError);
+  });
+
+  it('read-only methods also throw DisposedError when state is "disposed"', () => {
+    const lens = makeLens();
+    forceState(lens, 'disposed');
+    expect(() => lens.getCapacity()).toThrow(DisposedError);
+    expect(() => lens.getSegmentCount()).toThrow(DisposedError);
+    expect(() => lens.assess()).toThrow(DisposedError);
+    expect(() => lens.snapshot()).toThrow(DisposedError);
+    expect(() => lens.getDiagnostics()).toThrow(DisposedError);
+  });
+
+  it('mutating methods throw DisposedError when state is "disposing"', () => {
+    const lens = makeLens();
+    forceState(lens, 'disposing');
+    expect(() => lens.add('x')).toThrow(DisposedError);
+    expect(() => lens.setCapacity(5000)).toThrow(DisposedError);
+    expect(() => lens.attachIntegration(() => {})).toThrow(DisposedError);
+  });
+
+  it('read-only methods do NOT throw when state is "disposing"', () => {
+    const lens = makeLens();
+    lens.add('seed-content');  // populate something so reads have data
+    forceState(lens, 'disposing');
+    expect(() => lens.getCapacity()).not.toThrow();
+    expect(() => lens.getSegmentCount()).not.toThrow();
+    expect(() => lens.assess()).not.toThrow();
+    expect(() => lens.snapshot()).not.toThrow();
+  });
+
+  it('thrown DisposedError carries instanceId and the attempted method name', () => {
+    const lens = makeLens();
+    const id = lens.instanceId;
+    forceState(lens, 'disposed');
+    try {
+      lens.add('x');
+      expect.fail('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(DisposedError);
+      const err = e as DisposedError;
+      expect(err.instanceId).toBe(id);
+      expect(err.attemptedMethod).toBe('add');
+    }
+  });
+});
+
+// T11: dispose() — real flow. Exercises the orchestrator end-to-end via the
+// public method. Unit-level coverage of mechanism (state machine, idempotency,
+// reentrancy, error aggregation). Full integration flows live in T14.
+
+describe('dispose() — real flow', () => {
+  it('flips lifecycle to disposed and emits stateDisposed exactly once', () => {
+    const lens = makeLens();
+    let count = 0;
+    lens.on('stateDisposed', () => { count++; });
+    lens.dispose();
+    expect(count).toBe(1);
+    expect(lens.isDisposed).toBe(true);
+    expect(lens.isDisposing).toBe(false);
+  });
+
+  it('stateDisposed payload has the documented shape and is frozen', () => {
+    const lens = makeLens();
+    const id = lens.instanceId;
+    const before = Date.now();
+    let captured: { type: string; instanceId: string; timestamp: number } | null = null;
+    lens.on('stateDisposed', (e) => { captured = e; });
+    lens.dispose();
+    const after = Date.now();
+    expect(captured).not.toBeNull();
+    const payload = captured as unknown as { type: string; instanceId: string; timestamp: number };
+    expect(payload.type).toBe('stateDisposed');
+    expect(payload.instanceId).toBe(id);
+    expect(payload.timestamp).toBeGreaterThanOrEqual(before);
+    expect(payload.timestamp).toBeLessThanOrEqual(after);
+    expect(Object.isFrozen(payload)).toBe(true);
+  });
+
+  it('is idempotent — three calls fire stateDisposed exactly once', () => {
+    const lens = makeLens();
+    let count = 0;
+    lens.on('stateDisposed', () => { count++; });
+    expect(() => { lens.dispose(); lens.dispose(); lens.dispose(); }).not.toThrow();
+    expect(count).toBe(1);
+    expect(lens.isDisposed).toBe(true);
+  });
+
+  it('is reentrant-safe — a stateDisposed handler that calls dispose() does not double-emit', () => {
+    const lens = makeLens();
+    let count = 0;
+    lens.on('stateDisposed', () => {
+      count++;
+      lens.dispose();   // reentrant call during teardown — must no-op
+    });
+    expect(() => lens.dispose()).not.toThrow();
+    expect(count).toBe(1);
+    expect(lens.isDisposed).toBe(true);
+  });
+
+  it('mutating methods throw DisposedError after real dispose()', () => {
+    const lens = makeLens();
+    lens.dispose();
+    expect(() => lens.add('x')).toThrow(DisposedError);
+    expect(() => lens.setCapacity(5000)).toThrow(DisposedError);
+    expect(() => lens.attachIntegration(() => {})).toThrow(DisposedError);
+  });
+
+  it('read-only methods throw DisposedError after real dispose()', () => {
+    const lens = makeLens();
+    lens.dispose();
+    expect(() => lens.getCapacity()).toThrow(DisposedError);
+    expect(() => lens.assess()).toThrow(DisposedError);
+    expect(() => lens.snapshot()).toThrow(DisposedError);
+    expect(() => lens.getDiagnostics()).toThrow(DisposedError);
+  });
+
+  it('throwing handler causes DisposalError; instance is fully disposed regardless', () => {
+    const lens = makeLens();
+    const id = lens.instanceId;
+    lens.on('stateDisposed', () => { throw new Error('handler boom'); });
+    let raised: unknown = null;
+    try { lens.dispose(); } catch (e) { raised = e; }
+    expect(raised).toBeInstanceOf(DisposalError);
+    const err = raised as DisposalError;
+    expect(err.instanceId).toBe(id);
+    expect(err.errors.length).toBe(1);
+    const tagged = err.errors[0] as { cause: unknown; origin: string; index: number };
+    expect(tagged.origin).toBe('handler');
+    expect(tagged.index).toBe(0);
+    expect((tagged.cause as Error).message).toBe('handler boom');
+    // Disposal completed despite the throw.
+    expect(lens.isDisposed).toBe(true);
+    expect(lens.isDisposing).toBe(false);
+  });
+
+  it('invokes registered integration callbacks during teardown with the live instance', () => {
+    const lens = makeLens();
+    let invoked = 0;
+    let receivedInstance: unknown = null;
+    let stateAtCallback: { isDisposed: boolean; isDisposing: boolean } | null = null;
+    lens.attachIntegration((live) => {
+      invoked++;
+      receivedInstance = live;
+      stateAtCallback = { isDisposed: live.isDisposed, isDisposing: live.isDisposing };
+    });
+    lens.dispose();
+    expect(invoked).toBe(1);
+    expect(receivedInstance).toBe(lens);
+    // Integration callback runs in step 3 — disposing flag set, disposed not yet.
+    expect(stateAtCallback).toEqual({ isDisposed: false, isDisposing: true });
+  });
+
+  it('throwing integration callback aggregates into DisposalError with origin tag', () => {
+    const lens = makeLens();
+    lens.attachIntegration(() => { throw new Error('integration boom'); });
+    let raised: unknown = null;
+    try { lens.dispose(); } catch (e) { raised = e; }
+    expect(raised).toBeInstanceOf(DisposalError);
+    const err = raised as DisposalError;
+    expect(err.errors.length).toBe(1);
+    const tagged = err.errors[0] as { cause: unknown; origin: string; index: number };
+    expect(tagged.origin).toBe('integration');
+    expect(tagged.index).toBe(0);
+    expect((tagged.cause as Error).message).toBe('integration boom');
+    expect(lens.isDisposed).toBe(true);
+  });
+
+  it('aggregates mixed handler+integration errors with origin-relative indices', () => {
+    const lens = makeLens();
+    lens.on('stateDisposed', () => { throw new Error('h0'); });
+    lens.on('stateDisposed', () => { throw new Error('h1'); });
+    lens.attachIntegration(() => { throw new Error('i0'); });
+    lens.attachIntegration(() => { /* no-throw */ });
+    lens.attachIntegration(() => { throw new Error('i1'); });
+
+    let raised: unknown = null;
+    try { lens.dispose(); } catch (e) { raised = e; }
+    expect(raised).toBeInstanceOf(DisposalError);
+    const err = raised as DisposalError;
+    // 2 handler errors + 2 integration errors (the no-throw integration is skipped).
+    expect(err.errors.length).toBe(4);
+    const items = err.errors as { cause: unknown; origin: string; index: number }[];
+    expect(items[0]).toMatchObject({ origin: 'handler', index: 0 });
+    expect((items[0].cause as Error).message).toBe('h0');
+    expect(items[1]).toMatchObject({ origin: 'handler', index: 1 });
+    expect((items[1].cause as Error).message).toBe('h1');
+    // Integration index restarts at 0 (origin-relative).
+    expect(items[2]).toMatchObject({ origin: 'integration', index: 0 });
+    expect((items[2].cause as Error).message).toBe('i0');
+    expect(items[3]).toMatchObject({ origin: 'integration', index: 1 });
+    expect((items[3].cause as Error).message).toBe('i1');
+    expect(lens.isDisposed).toBe(true);
+  });
+});
+
+// ─── Memory Management (cl-spec-007 §8.9, Gap 6) ──────────────────
+
+describe('Memory management', () => {
+  function makeWarmedLens(): ContextLens {
+    const lens = new ContextLens({ capacity: 100000 });
+    // Warm all three caches: token cache via add, similarity cache via assess,
+    // embedding cache via assess (trigram mode by default — still populated).
+    lens.add('first segment full of unique words for tokenization aaa');
+    lens.add('second segment full of different unique words bbb');
+    lens.add('third segment full of yet more distinctive words ccc');
+    lens.assess();
+    return lens;
+  }
+
+  it('clearCaches() with no argument clears all three caches and emits cachesCleared("all")', () => {
+    const lens = makeWarmedLens();
+
+    const events: { kind: string; entriesCleared: { tokenizer: number; embedding: number; similarity: number } }[] = [];
+    lens.on('cachesCleared', (p) => events.push(p));
+
+    const before = lens.getMemoryUsage();
+    expect(before.tokenizer.entries).toBeGreaterThan(0);
+    expect(before.embedding.entries).toBeGreaterThan(0);
+    expect(before.similarity.entries).toBeGreaterThan(0);
+
+    lens.clearCaches();
+
+    const after = lens.getMemoryUsage();
+    expect(after.tokenizer.entries).toBe(0);
+    expect(after.embedding.entries).toBe(0);
+    expect(after.similarity.entries).toBe(0);
+    expect(after.totalEstimatedBytes).toBe(0);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]!.kind).toBe('all');
+    expect(events[0]!.entriesCleared.tokenizer).toBe(before.tokenizer.entries);
+    expect(events[0]!.entriesCleared.embedding).toBe(before.embedding.entries);
+    expect(events[0]!.entriesCleared.similarity).toBe(before.similarity.entries);
+  });
+
+  it('clearCaches("tokenizer") empties only the token cache; others unchanged', () => {
+    const lens = makeWarmedLens();
+    const before = lens.getMemoryUsage();
+
+    lens.clearCaches('tokenizer');
+
+    const after = lens.getMemoryUsage();
+    expect(after.tokenizer.entries).toBe(0);
+    expect(after.embedding.entries).toBe(before.embedding.entries);
+    expect(after.similarity.entries).toBe(before.similarity.entries);
+  });
+
+  it('clearCaches("embedding") empties only the embedding cache', () => {
+    const lens = makeWarmedLens();
+    const before = lens.getMemoryUsage();
+
+    lens.clearCaches('embedding');
+
+    const after = lens.getMemoryUsage();
+    expect(after.tokenizer.entries).toBe(before.tokenizer.entries);
+    expect(after.embedding.entries).toBe(0);
+    expect(after.similarity.entries).toBe(before.similarity.entries);
+  });
+
+  it('clearCaches("similarity") empties only the similarity cache', () => {
+    const lens = makeWarmedLens();
+    const before = lens.getMemoryUsage();
+
+    lens.clearCaches('similarity');
+
+    const after = lens.getMemoryUsage();
+    expect(after.tokenizer.entries).toBe(before.tokenizer.entries);
+    expect(after.embedding.entries).toBe(before.embedding.entries);
+    expect(after.similarity.entries).toBe(0);
+  });
+
+  it('clearCaches("invalid") throws ValidationError; instance state unchanged', () => {
+    const lens = makeWarmedLens();
+    const before = lens.getMemoryUsage();
+
+    expect(() => lens.clearCaches('invalid' as 'all')).toThrow(ValidationError);
+
+    const after = lens.getMemoryUsage();
+    expect(after.tokenizer.entries).toBe(before.tokenizer.entries);
+    expect(after.embedding.entries).toBe(before.embedding.entries);
+    expect(after.similarity.entries).toBe(before.similarity.entries);
+  });
+
+  it('setCacheSize shrinks the named cache; does NOT emit cachesCleared', () => {
+    const lens = makeWarmedLens();
+    const events: unknown[] = [];
+    lens.on('cachesCleared', (p) => events.push(p));
+
+    lens.setCacheSize('embedding', 1);
+
+    const usage = lens.getMemoryUsage();
+    expect(usage.embedding.maxEntries).toBe(1);
+    expect(usage.embedding.entries).toBeLessThanOrEqual(1);
+    expect(events).toHaveLength(0);
+  });
+
+  it('setCacheSize(kind, 0) disables the named cache', () => {
+    const lens = makeWarmedLens();
+
+    lens.setCacheSize('similarity', 0);
+    const usage = lens.getMemoryUsage();
+    expect(usage.similarity.entries).toBe(0);
+    expect(usage.similarity.maxEntries).toBe(0);
+
+    // Re-running assess populates segments but the disabled cache stays empty.
+    lens.add('an additional segment to force a new assess cycle');
+    lens.assess();
+    expect(lens.getMemoryUsage().similarity.entries).toBe(0);
+  });
+
+  it('setCacheSize("all", N) throws ValidationError', () => {
+    const lens = new ContextLens({ capacity: 1000 });
+    expect(() => lens.setCacheSize('all' as 'embedding', 1000)).toThrow(ValidationError);
+  });
+
+  it('setCacheSize rejects negative size', () => {
+    const lens = new ContextLens({ capacity: 1000 });
+    expect(() => lens.setCacheSize('embedding', -1)).toThrow(ValidationError);
+  });
+
+  it('setCacheSize rejects non-integer size', () => {
+    const lens = new ContextLens({ capacity: 1000 });
+    expect(() => lens.setCacheSize('embedding', 1.5)).toThrow(ValidationError);
+  });
+
+  it('setCacheSize rejects unknown kind', () => {
+    const lens = new ContextLens({ capacity: 1000 });
+    expect(() => lens.setCacheSize('bogus' as 'embedding', 100)).toThrow(ValidationError);
+  });
+
+  it('getMemoryUsage returns the documented shape with totalEstimatedBytes matching the per-cache sum', () => {
+    const lens = makeWarmedLens();
+    const usage = lens.getMemoryUsage();
+
+    expect(usage).toMatchObject({
+      tokenizer: expect.objectContaining({
+        entries: expect.any(Number),
+        maxEntries: expect.any(Number),
+        estimatedBytes: expect.any(Number),
+      }),
+      embedding: expect.objectContaining({
+        entries: expect.any(Number),
+        maxEntries: expect.any(Number),
+        estimatedBytes: expect.any(Number),
+      }),
+      similarity: expect.objectContaining({
+        entries: expect.any(Number),
+        maxEntries: expect.any(Number),
+        estimatedBytes: expect.any(Number),
+      }),
+      totalEstimatedBytes: expect.any(Number),
+    });
+    expect(usage.totalEstimatedBytes).toBe(
+      usage.tokenizer.estimatedBytes + usage.embedding.estimatedBytes + usage.similarity.estimatedBytes,
+    );
+  });
+
+  it('getMemoryUsage uses 80 bytes/entry for similarity and 100 bytes/entry for tokenizer', () => {
+    const lens = makeWarmedLens();
+    const usage = lens.getMemoryUsage();
+
+    expect(usage.tokenizer.estimatedBytes).toBe(usage.tokenizer.entries * 100);
+    expect(usage.similarity.estimatedBytes).toBe(usage.similarity.entries * 80);
+  });
+
+  it('getMemoryUsage uses 8000 bytes/entry for embedding cache in trigram mode', () => {
+    const lens = makeWarmedLens();
+    const usage = lens.getMemoryUsage();
+    // Default zero-config lens runs in trigram mode.
+    expect(usage.embedding.estimatedBytes).toBe(usage.embedding.entries * 8000);
+  });
+
+  it('getMemoryUsage after clearCaches reports zero entries', () => {
+    const lens = makeWarmedLens();
+    lens.clearCaches();
+    const usage = lens.getMemoryUsage();
+    expect(usage.tokenizer.entries).toBe(0);
+    expect(usage.embedding.entries).toBe(0);
+    expect(usage.similarity.entries).toBe(0);
+    expect(usage.totalEstimatedBytes).toBe(0);
+  });
+
+  it('clearCaches() throws DisposedError after dispose()', () => {
+    const lens = new ContextLens({ capacity: 1000 });
+    lens.dispose();
+    expect(() => lens.clearCaches()).toThrow(DisposedError);
+  });
+
+  it('setCacheSize throws DisposedError after dispose()', () => {
+    const lens = new ContextLens({ capacity: 1000 });
+    lens.dispose();
+    expect(() => lens.setCacheSize('embedding', 100)).toThrow(DisposedError);
+  });
+
+  it('getMemoryUsage throws DisposedError after dispose()', () => {
+    const lens = new ContextLens({ capacity: 1000 });
+    lens.dispose();
+    expect(() => lens.getMemoryUsage()).toThrow(DisposedError);
+  });
+
+  it('clearCaches preserves segments and assessment continues', () => {
+    const lens = makeWarmedLens();
+    const segCountBefore = lens.getSegmentCount();
+    lens.clearCaches();
+
+    expect(lens.getSegmentCount()).toBe(segCountBefore);
+
+    // Segments still have their stored tokenCount (count stability invariant).
+    const segs = lens.listSegments();
+    for (const seg of segs) {
+      expect(seg.tokenCount).toBeGreaterThan(0);
+    }
+
+    // The next assess() that follows a mutation produces a fresh report and
+    // repopulates the underlying caches. (assess() without an intervening
+    // mutation returns the cached report — see cl-spec-002 §9.6 quality-
+    // report caching; clearCaches does not invalidate that higher-level
+    // cache because it is the assembled output, not a derived primitive.)
+    lens.add('a fresh segment to invalidate the quality report cache');
+    const report = lens.assess();
+    expect(report).toBeDefined();
+    const usageAfterAssess = lens.getMemoryUsage();
+    expect(usageAfterAssess.similarity.entries).toBeGreaterThan(0);
+  });
+});
+
+// ─── similarityCacheSize config (cl-spec-016, Gap 5) ──────────────
+
+describe('similarityCacheSize config', () => {
+  it('default scales with capacity, clamped to [16384, 65536]', () => {
+    // Lower bound — at capacity < 200, formula computes < 16384, clamped up
+    const tiny = new ContextLens({ capacity: 100 });
+    expect(tiny.getMemoryUsage().similarity.maxEntries).toBe(16384);
+
+    // Right at the formula's natural lower bound — sqrt(200/200) × 16384 = 16384
+    const minimum = new ContextLens({ capacity: 200 });
+    expect(minimum.getMemoryUsage().similarity.maxEntries).toBe(16384);
+
+    // Mid-range — formula computes between bounds
+    // sqrt(800/200) × 16384 = 2 × 16384 = 32768 (within bounds)
+    const mid = new ContextLens({ capacity: 800 });
+    expect(mid.getMemoryUsage().similarity.maxEntries).toBe(32768);
+
+    // Upper bound at typical large capacity
+    const large = new ContextLens({ capacity: 128000 });
+    expect(large.getMemoryUsage().similarity.maxEntries).toBe(65536);
+
+    // Upper bound at huge capacity
+    const huge = new ContextLens({ capacity: 1000000 });
+    expect(huge.getMemoryUsage().similarity.maxEntries).toBe(65536);
+  });
+
+  it('explicit similarityCacheSize overrides the default', () => {
+    const lens = new ContextLens({ capacity: 128000, similarityCacheSize: 4096 });
+    expect(lens.getMemoryUsage().similarity.maxEntries).toBe(4096);
+  });
+
+  it('similarityCacheSize: 0 disables the cache', () => {
+    const lens = new ContextLens({ capacity: 100000, similarityCacheSize: 0 });
+    expect(lens.getMemoryUsage().similarity.maxEntries).toBe(0);
+
+    // Subsequent operations work but every similarity lookup misses.
+    lens.add('one segment');
+    lens.add('another segment with different content');
+    lens.assess();
+    expect(lens.getMemoryUsage().similarity.entries).toBe(0);
+  });
+
+  it('rejects negative similarityCacheSize with ConfigurationError', () => {
+    expect(() => new ContextLens({ capacity: 1000, similarityCacheSize: -1 }))
+      .toThrow(ConfigurationError);
+  });
+
+  it('rejects non-integer similarityCacheSize with ConfigurationError', () => {
+    expect(() => new ContextLens({ capacity: 1000, similarityCacheSize: 1.5 }))
+      .toThrow(ConfigurationError);
+  });
+
+  it('rejects NaN similarityCacheSize with ConfigurationError', () => {
+    expect(() => new ContextLens({ capacity: 1000, similarityCacheSize: Number.NaN }))
+      .toThrow(ConfigurationError);
+  });
+
+  it('snapshot captures similarityCacheSize; fromSnapshot honors it', () => {
+    const a = new ContextLens({ capacity: 50000, similarityCacheSize: 8192 });
+    a.add('content one for the fresh window');
+    a.add('content two for the fresh window');
+    const state = a.snapshot();
+    expect(state.config.similarityCacheSize).toBe(8192);
+
+    const b = ContextLens.fromSnapshot(state, {});
+    expect(b.getMemoryUsage().similarity.maxEntries).toBe(8192);
+  });
+
+  it('fromSnapshot falls back to default when similarityCacheSize is absent (forward-compat)', () => {
+    const a = new ContextLens({ capacity: 128000 });
+    a.add('seed content');
+    const state = a.snapshot();
+    // Simulate an older snapshot by deleting the field.
+    delete (state.config as { similarityCacheSize?: number }).similarityCacheSize;
+
+    const b = ContextLens.fromSnapshot(state, {});
+    // Defaults to upper bound at capacity=128000.
+    expect(b.getMemoryUsage().similarity.maxEntries).toBe(65536);
   });
 });

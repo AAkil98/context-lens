@@ -562,4 +562,71 @@ describe('Tokenizer.getInfo()', () => {
       expect(counts['ps-2']).toBe(42);
     });
   });
+
+  describe('clearCache (cl-spec-015 §4.1)', () => {
+    it('empties the cache; subsequent count() recomputes from the provider', () => {
+      let providerCalls = 0;
+      const provider: TokenizerProvider = { count: () => { providerCalls++; return 7; } };
+      const tok = new Tokenizer(
+        provider,
+        { name: 'p', accuracy: 'exact', modelFamily: null, errorBound: null },
+        256,
+      );
+
+      tok.count('hello');
+      expect(providerCalls).toBe(1);
+      tok.count('hello');
+      expect(providerCalls).toBe(1);  // cached — no new provider call
+
+      tok.clearCache();
+      tok.count('hello');
+      expect(providerCalls).toBe(2);  // recomputed
+    });
+
+    it('is idempotent and the tokenizer remains functional after clearCache', () => {
+      const tok = new Tokenizer('approximate', undefined, 256);
+      tok.count('seed-content');
+      expect(() => {
+        tok.clearCache();
+        tok.clearCache();
+        tok.clearCache();
+      }).not.toThrow();
+      expect(tok.count('post-clear')).toBeGreaterThan(0);
+    });
+  });
+
+  // ── Memory management hooks (cl-spec-007 §8.9, cl-spec-006 §5.6) ─
+
+  describe('Memory management hooks', () => {
+    it('getEntryCount + getMaxEntries reflect current cache state', () => {
+      const tok = new Tokenizer('approximate', undefined, 100);
+      expect(tok.getEntryCount()).toBe(0);
+      expect(tok.getMaxEntries()).toBe(100);
+      tok.count('one');
+      tok.count('two');
+      expect(tok.getEntryCount()).toBe(2);
+    });
+
+    it('setCacheSize shrinks and returns evicted count', () => {
+      const tok = new Tokenizer('approximate', undefined, 10);
+      for (let i = 0; i < 10; i++) tok.count(`fragment-${i}`);
+      expect(tok.getEntryCount()).toBe(10);
+
+      const evicted = tok.setCacheSize(3);
+      expect(evicted).toBe(7);
+      expect(tok.getEntryCount()).toBe(3);
+      expect(tok.getMaxEntries()).toBe(3);
+    });
+
+    it('setCacheSize(0) disables the cache; count() still returns correct results', () => {
+      const tok = new Tokenizer('approximate', undefined, 100);
+      tok.count('warmup');
+      tok.setCacheSize(0);
+      expect(tok.getEntryCount()).toBe(0);
+      expect(tok.getMaxEntries()).toBe(0);
+
+      expect(tok.count('post-disable')).toBeGreaterThan(0);
+      expect(tok.getEntryCount()).toBe(0);
+    });
+  });
 });

@@ -8,7 +8,7 @@
  */
 
 import type { ContextLens } from './index.js';
-import type { QualityReport } from './types.js';
+import type { QualityReport, IntegrationHandle } from './types.js';
 
 // ─── Minimal OTel interfaces (structural typing) ────────────────
 // Defined locally to avoid tight coupling to specific @opentelemetry/api versions.
@@ -80,12 +80,23 @@ export interface ExporterOptions {
 // ─── ContextLensExporter ─────────────────────────────────────────
 
 export class ContextLensExporter {
-  private readonly instance: ContextLens;
+  /** Currently bound instance, or null when detached. Becomes nullable to support `attach()` after `disconnect()` per cl-spec-013 §2.1.3. */
+  private instance: ContextLens | null;
   private readonly prefix: string;
   private readonly label: string;
   private readonly emitEvents: boolean;
   private readonly logger: OTelLogger | null;
+
+  /**
+   * Detached state flag. True between disconnect/auto-disconnect and a
+   * subsequent successful `attach()`; false while the exporter is bound to a
+   * live instance. Replaces the prior "terminally disconnected" semantics — a
+   * detached exporter may now be re-attached (cl-spec-013 §2.1.3).
+   */
   private disconnected = false;
+
+  /** Lifecycle integration handle. Non-null while attached; nulled on disconnect/auto-disconnect; refreshed on `attach()`. */
+  private integrationHandle: IntegrationHandle | null;
 
   // Unsubscribe functions for instance events
   private readonly unsubscribers: (() => void)[] = [];
@@ -102,10 +113,17 @@ export class ContextLensExporter {
   private storedPatternCount = 0;
   private hasQualityValues = false;
 
-  // Gauge + callback pairs for cleanup on disconnect
-  private readonly gaugeCleanup: Array<{
+  /**
+   * Gauge registry — preserved across detach/attach cycles so the same
+   * `OTelObservableGauge` instances continue to satisfy Invariant 10
+   * ("instruments reused, not re-created"). `currentCallback` is the callback
+   * currently registered with OTel (null when detached); `getValue` is the
+   * stored-value reader closure used to construct fresh callbacks per cycle.
+   */
+  private readonly gauges: Array<{
     gauge: OTelObservableGauge;
-    callback: (result: OTelObservableResult) => void;
+    getValue: () => number | null;
+    currentCallback: ((result: OTelObservableResult) => void) | null;
   }> = [];
 
   // Counters
@@ -138,6 +156,8 @@ export class ContextLensExporter {
     const meter = options.meterProvider.getMeter('context_lens');
 
     // ── Gauges (observable) ──────────────────────────────────────
+    // Populate the persistent gauge registry once; callbacks are added by
+    // attachGaugeCallbacks below and may be removed/re-added across cycles.
     this.registerGauge(meter, 'coherence', '1', 'Window coherence score', () =>
       this.hasQualityValues ? this.storedCoherence : null,
     );
@@ -177,30 +197,153 @@ export class ContextLensExporter {
       description: 'Assessment duration',
     });
 
-    // ── Subscribe to instance events ─────────────────────────────
-    this.subscribeAll();
+    // ── Wire gauge callbacks + subscribe to instance events ──────
+    this.attachGaugeCallbacks();
+    this.subscribeAll(instance);
+
+    // ── Lifecycle integration handshake (cl-spec-013 §2.1.2) ─────
+    // Attach last so subscribeAll has already validated the instance is
+    // reachable. attachIntegration throws DisposedError if the instance is
+    // already disposed; the constructor lets that propagate.
+    this.integrationHandle = instance.attachIntegration((live) => {
+      this.handleInstanceDisposal(live);
+    });
   }
 
   /**
    * Stop metric updates, remove gauge callbacks, and unsubscribe from all instance events.
-   * Idempotent — safe to call multiple times.
-   * @see cl-spec-013 §5
+   * Detaches the lifecycle integration handle so a later `dispose()` on the
+   * instance does not fire the `context_lens.instance.disposed` log event
+   * (cl-spec-013 §2.1.1). Idempotent — safe to call multiple times.
+   *
+   * After disconnect the exporter is in the detached state. It may be
+   * re-bound to a fresh instance via `attach()` (cl-spec-013 §2.1.3); the OTel
+   * instruments (gauges, counters, histogram) are preserved across the cycle.
+   * @see cl-spec-013 §2.1.1
    */
   disconnect(): void {
     if (this.disconnected) return;
     this.disconnected = true;
 
-    for (const unsub of this.unsubscribers) unsub();
-    this.unsubscribers.length = 0;
-
-    for (const { gauge, callback } of this.gaugeCleanup) {
-      gauge.removeCallback(callback);
+    if (this.integrationHandle !== null) {
+      this.integrationHandle.detach();
+      this.integrationHandle = null;
     }
-    this.gaugeCleanup.length = 0;
+    this.detachGaugeCallbacks();
+    this.cleanupSubscriptions();
+    this.instance = null;
   }
 
-  // ── Private: gauge registration ──────────────────────────────
+  /**
+   * Re-attach a detached exporter to a fresh `ContextLens` instance.
+   *
+   * Preconditions: the exporter must be in the detached state (after
+   * `disconnect()` or auto-disconnect via the previous instance's `dispose()`),
+   * and `instance` must be live. Throws `Error` if attempted on a still-
+   * connected exporter; throws `DisposedError` (raised by `attachIntegration`)
+   * if `instance` is already disposed. On either failure the exporter remains
+   * in the detached state — no partial attachment.
+   *
+   * State scope: counters and histograms are preserved (no reset; OTel
+   * monotonic and distributional contracts unbroken across the cycle). Gauge
+   * stored values are reset to defaults so the first `reportGenerated` event
+   * from the newly-attached instance repopulates them. The OTel instruments
+   * themselves are reused — `attach()` does not re-register with the meter
+   * provider.
+   *
+   * @see cl-spec-013 §2.1.3, Invariants 10 and 11
+   */
+  attach(instance: ContextLens): void {
+    if (!this.disconnected) {
+      throw new Error(
+        'ContextLensExporter.attach: exporter is currently attached. ' +
+          'Call disconnect() before attaching to a new instance.',
+      );
+    }
 
+    // Validate via the lifecycle handshake first. attachIntegration throws
+    // DisposedError if the instance is already disposed. We do this BEFORE
+    // any state mutation so the exporter remains in a clean detached state
+    // on failure (no partial attachment).
+    const handle = instance.attachIntegration((live) => {
+      this.handleInstanceDisposal(live);
+    });
+
+    // Commit point — past here we are attached.
+    this.instance = instance;
+    this.integrationHandle = handle;
+    this.disconnected = false;
+
+    // Reset gauge state so the new instance's first reportGenerated
+    // repopulates the values. Counters and histogram are deliberately
+    // untouched (Invariant 10).
+    this.resetGaugeState();
+
+    // Re-register gauge callbacks and event subscriptions against the
+    // new instance.
+    this.attachGaugeCallbacks();
+    this.subscribeAll(instance);
+  }
+
+  // ── Private: lifecycle integration callback (cl-spec-013 §2.1.2) ─
+
+  /**
+   * Invoked synchronously during step 3 of the instance's `dispose()` teardown.
+   * Performs the final-signal flush (one fresh `assess()` to capture last
+   * composite + utilization), emits the `context_lens.instance.disposed` log
+   * event, and then runs the same subscription cleanup as `disconnect()`.
+   * Convergent end state with explicit `disconnect()` — both leave
+   * `disconnected === true` with no live subscriptions or gauge callbacks.
+   *
+   * Per cl-spec-015 §6.2 the instance is in `isDisposing === true` here;
+   * `assess()` is read-only and passes the disposing-state guard.
+   */
+  private handleInstanceDisposal(instance: ContextLens): void {
+    if (this.disconnected) return;
+    this.disconnected = true;
+
+    let finalReport: QualityReport | null = null;
+    try {
+      finalReport = instance.assess();
+    } catch {
+      finalReport = null;
+    }
+
+    if (this.emitEvents && this.logger) {
+      const attrs: OTelAttributes = { 'instance.id': instance.instanceId };
+      if (finalReport !== null) {
+        if (finalReport.composite !== null) {
+          attrs['instance.final_composite'] = finalReport.composite;
+        }
+        attrs['instance.final_utilization'] = finalReport.capacity.utilization;
+      }
+      this.log('context_lens.instance.disposed', SEV_INFO, attrs);
+    }
+
+    this.detachGaugeCallbacks();
+    this.cleanupSubscriptions();
+    // The IntegrationRegistry has already removed this entry from its array
+    // as part of invokeAll(); the handle's detach() would be a no-op even if
+    // called. Null the field anyway to mirror the disconnect() shape.
+    this.integrationHandle = null;
+    this.instance = null;
+  }
+
+  // ── Private: shared cleanup ──────────────────────────────────
+
+  private cleanupSubscriptions(): void {
+    for (const unsub of this.unsubscribers) unsub();
+    this.unsubscribers.length = 0;
+  }
+
+  // ── Private: gauge registration + callback management ────────
+
+  /**
+   * One-shot gauge registration. Called from the constructor only — populates
+   * the persistent gauge registry but does NOT install the OTel callback.
+   * Callback wiring lives in {@link attachGaugeCallbacks} so it can be
+   * removed and re-added across detach/attach cycles per cl-spec-013 §2.1.3.
+   */
   private registerGauge(
     meter: OTelMeter,
     name: string,
@@ -209,20 +352,78 @@ export class ContextLensExporter {
     getValue: () => number | null,
   ): void {
     const gauge = meter.createObservableGauge(`${this.prefix}.${name}`, { unit, description });
+    this.gauges.push({ gauge, getValue, currentCallback: null });
+  }
 
-    const callback = (result: OTelObservableResult) => {
-      if (this.disconnected) return;
-      const val = getValue();
-      if (val !== null) result.observe(val, this.commonAttributes());
-    };
+  /**
+   * Install fresh gauge callbacks against OTel for every entry in
+   * {@link gauges}. Called once at construction and again from {@link attach}.
+   * Each callback wraps the value-producer with the disconnected guard plus
+   * the common-attribute lookup.
+   */
+  private attachGaugeCallbacks(): void {
+    for (const entry of this.gauges) {
+      // Defensive: if a callback is already attached, leave it. This branch
+      // is unreachable from the documented call sites (constructor and
+      // attach()), but the guard prevents double-registration if a future
+      // call site forgets to detach first.
+      if (entry.currentCallback !== null) continue;
 
-    gauge.addCallback(callback);
-    this.gaugeCleanup.push({ gauge, callback });
+      const callback = (result: OTelObservableResult): void => {
+        if (this.disconnected) return;
+        const val = entry.getValue();
+        if (val !== null) result.observe(val, this.commonAttributes());
+      };
+      entry.gauge.addCallback(callback);
+      entry.currentCallback = callback;
+    }
+  }
+
+  /**
+   * Remove all currently-attached gauge callbacks from OTel. Called from
+   * {@link disconnect} and {@link handleInstanceDisposal}. Preserves gauge
+   * identity in {@link gauges} so {@link attach} can re-register fresh
+   * callbacks against the same instruments.
+   */
+  private detachGaugeCallbacks(): void {
+    for (const entry of this.gauges) {
+      if (entry.currentCallback !== null) {
+        entry.gauge.removeCallback(entry.currentCallback);
+        entry.currentCallback = null;
+      }
+    }
+  }
+
+  /**
+   * Reset stored gauge values to their construction-time defaults. Called from
+   * {@link attach} so the new instance's first `reportGenerated` event
+   * repopulates the values rather than carrying over the prior instance's
+   * point-in-time observations (cl-spec-013 §2.1.3, Invariant 10).
+   */
+  private resetGaugeState(): void {
+    this.storedCoherence = 0;
+    this.storedDensity = 0;
+    this.storedRelevance = 0;
+    this.storedContinuity = 0;
+    this.storedComposite = 0;
+    this.storedUtilization = 0;
+    this.storedSegmentCount = 0;
+    this.storedHeadroom = 0;
+    this.storedPatternCount = 0;
+    this.hasQualityValues = false;
   }
 
   // ── Private: common attributes ───────────────────────────────
 
   private commonAttributes(): OTelAttributes {
+    // Defensive guard for the detached state. Every reachable caller of
+    // commonAttributes already short-circuits on `disconnected`, so this
+    // branch is unreachable from the documented call sites. The guard is
+    // here to keep the method total in case a future refactor introduces a
+    // path that bypasses the disconnected check.
+    if (this.instance === null) {
+      return { 'context_lens.window': this.label };
+    }
     const embeddingInfo = this.instance.getEmbeddingProviderInfo();
     return {
       'context_lens.window': this.label,
@@ -233,10 +434,18 @@ export class ContextLensExporter {
 
   // ── Private: event subscriptions ─────────────────────────────
 
-  private subscribeAll(): void {
+  /**
+   * Subscribe to instance lifecycle and quality events. The `instance`
+   * parameter is the freshly-attached (or freshly-constructed) reference;
+   * the instance field on `this` may be the same value or null at the time
+   * of call (constructor sets it just-prior; `attach()` likewise). Using
+   * the parameter rather than `this.instance` keeps the call site
+   * type-safe across the nullable field shape introduced for re-attach.
+   */
+  private subscribeAll(instance: ContextLens): void {
     // reportGenerated → gauges + assess counter + histogram + capacity warning
     this.unsubscribers.push(
-      this.instance.on('reportGenerated', ({ report }) => {
+      instance.on('reportGenerated', ({ report }) => {
         if (this.disconnected) return;
         const attrs = this.commonAttributes();
 
@@ -257,7 +466,7 @@ export class ContextLensExporter {
 
     // segmentEvicted → counter
     this.unsubscribers.push(
-      this.instance.on('segmentEvicted', () => {
+      instance.on('segmentEvicted', () => {
         if (this.disconnected) return;
         this.counters.evictions.add(1, this.commonAttributes());
       }),
@@ -265,7 +474,7 @@ export class ContextLensExporter {
 
     // segmentCompacted → counter
     this.unsubscribers.push(
-      this.instance.on('segmentCompacted', () => {
+      instance.on('segmentCompacted', () => {
         if (this.disconnected) return;
         this.counters.compactions.add(1, this.commonAttributes());
       }),
@@ -273,7 +482,7 @@ export class ContextLensExporter {
 
     // segmentRestored → counter
     this.unsubscribers.push(
-      this.instance.on('segmentRestored', () => {
+      instance.on('segmentRestored', () => {
         if (this.disconnected) return;
         this.counters.restorations.add(1, this.commonAttributes());
       }),
@@ -281,7 +490,7 @@ export class ContextLensExporter {
 
     // patternActivated → counter + log event
     this.unsubscribers.push(
-      this.instance.on('patternActivated', ({ pattern }) => {
+      instance.on('patternActivated', ({ pattern }) => {
         if (this.disconnected) return;
         this.counters.patternActivations.add(1, this.commonAttributes());
         if (this.emitEvents && this.logger) {
@@ -296,7 +505,7 @@ export class ContextLensExporter {
 
     // patternResolved → log event only
     this.unsubscribers.push(
-      this.instance.on('patternResolved', ({ name, duration, peakSeverity }) => {
+      instance.on('patternResolved', ({ name, duration, peakSeverity }) => {
         if (this.disconnected) return;
         if (this.emitEvents && this.logger) {
           this.log('context_lens.pattern.resolved', SEV_INFO, {
@@ -310,7 +519,7 @@ export class ContextLensExporter {
 
     // taskChanged → counter (change only) + log event (all except "same")
     this.unsubscribers.push(
-      this.instance.on('taskChanged', ({ transition }) => {
+      instance.on('taskChanged', ({ transition }) => {
         if (this.disconnected) return;
         if (transition.type === 'change') {
           this.counters.taskChanges.add(1, this.commonAttributes());
@@ -327,7 +536,7 @@ export class ContextLensExporter {
 
     // budgetViolation → log event
     this.unsubscribers.push(
-      this.instance.on('budgetViolation', ({ operation, selfTime, budgetTarget }) => {
+      instance.on('budgetViolation', ({ operation, selfTime, budgetTarget }) => {
         if (this.disconnected) return;
         if (this.emitEvents && this.logger) {
           this.log('context_lens.budget.violated', SEV_WARN, {

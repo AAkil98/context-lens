@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ContextLens } from '../../src/index.js';
 import { ContextLensFleet } from '../../src/fleet.js';
-import { DuplicateIdError, ValidationError } from '../../src/errors.js';
-import type { Segment, ActivePattern } from '../../src/types.js';
+import { DisposedError, DuplicateIdError, ValidationError } from '../../src/errors.js';
+import type { Segment, ActivePattern, InstanceReport } from '../../src/types.js';
 
 // ─── Helpers ────────────────────────────────────────────────────
 
@@ -553,6 +553,341 @@ describe('ContextLensFleet — Unit Tests', () => {
     it('rejects invalid degradationThreshold', () => {
       expect(() => new ContextLensFleet({ degradationThreshold: -0.1 })).toThrow(ValidationError);
       expect(() => new ContextLensFleet({ degradationThreshold: 1.1 })).toThrow(ValidationError);
+    });
+  });
+
+  // ── Lifecycle integration (cl-spec-012 §7) ───────────────────
+
+  describe('Lifecycle integration', () => {
+    it('register throws DisposedError when the instance is already disposed', () => {
+      const lens = makeLens();
+      lens.dispose();
+      expect(() => fleet.register(lens, 'window-1')).toThrow(DisposedError);
+    });
+
+    it('register is atomic — DisposedError leaves fleet untouched', () => {
+      const lens = makeLens();
+      lens.dispose();
+      try { fleet.register(lens, 'doomed'); } catch { /* expected */ }
+      expect(fleet.size).toBe(0);
+      expect(fleet.listInstances()).toEqual([]);
+      expect(fleet.get('doomed')).toBeNull();
+    });
+
+    it('dispose() on a registered instance fires instanceDisposed with the documented payload', () => {
+      const lens = makeLens();
+      const id = lens.instanceId;
+      lens.add(distinctContent(0));
+      fleet.register(lens, 'window-1');
+
+      const events: { label: string; instanceId: string; finalReport: InstanceReport | null }[] = [];
+      fleet.on('instanceDisposed', (e) => { events.push(e); });
+
+      lens.dispose();
+
+      expect(events).toHaveLength(1);
+      expect(events[0]!.label).toBe('window-1');
+      expect(events[0]!.instanceId).toBe(id);
+      expect(events[0]!.finalReport).not.toBeNull();
+      expect(events[0]!.finalReport!.status).toBe('ok');
+      expect(events[0]!.finalReport!.report).not.toBeNull();
+    });
+
+    it('auto-unregister removes the instance from the tracked set', () => {
+      const lens = makeLens();
+      lens.add(distinctContent(0));
+      fleet.register(lens, 'window-1');
+      expect(fleet.size).toBe(1);
+
+      lens.dispose();
+
+      expect(fleet.size).toBe(0);
+      expect(fleet.listInstances()).toEqual([]);
+      expect(fleet.get('window-1')).toBeNull();
+    });
+
+    it('disposing one instance leaves other registered instances untouched', () => {
+      const a = makeLens();
+      const b = makeLens();
+      a.add(distinctContent(0));
+      b.add(distinctContent(1));
+      fleet.register(a, 'a');
+      fleet.register(b, 'b');
+
+      a.dispose();
+
+      expect(fleet.size).toBe(1);
+      expect(fleet.get('a')).toBeNull();
+      expect(fleet.get('b')).toBe(b);
+      expect(b.isDisposed).toBe(false);
+    });
+
+    it('explicit unregister silences auto-emit — subsequent dispose fires no instanceDisposed event', () => {
+      const lens = makeLens();
+      fleet.register(lens, 'window-1');
+      let emitted = 0;
+      fleet.on('instanceDisposed', () => { emitted++; });
+
+      fleet.unregister('window-1');
+      lens.dispose();
+
+      expect(emitted).toBe(0);
+      expect(lens.isDisposed).toBe(true);
+    });
+
+    it('assessFleet excludes auto-unregistered instances after disposal', () => {
+      const a = makeLens();
+      const b = makeLens();
+      a.add(distinctContent(0));
+      b.add(distinctContent(1));
+      fleet.register(a, 'a');
+      fleet.register(b, 'b');
+
+      b.dispose();
+      const report = fleet.assessFleet();
+
+      expect(report.instanceCount).toBe(1);
+      expect(report.instances.map(r => r.label)).toEqual(['a']);
+    });
+
+    it('subsequent unregister of an auto-unregistered label throws "Label not found"', () => {
+      const lens = makeLens();
+      fleet.register(lens, 'window-1');
+      lens.dispose();
+
+      expect(() => fleet.unregister('window-1')).toThrow(ValidationError);
+    });
+
+    it('throwing instanceDisposed handler does not bubble — disposal completes cleanly', () => {
+      const lens = makeLens();
+      fleet.register(lens, 'window-1');
+      fleet.on('instanceDisposed', () => { throw new Error('subscriber boom'); });
+
+      // Fleet's standard emit swallows handler errors (cl-spec-007 §10.3), so
+      // the throw is absorbed inside the integration callback. dispose() does
+      // not raise DisposalError.
+      expect(() => lens.dispose()).not.toThrow();
+      expect(lens.isDisposed).toBe(true);
+      expect(fleet.size).toBe(0);
+    });
+
+    it('disposing without ever assessing still produces a finalReport (status=ok, fresh assess)', () => {
+      const lens = makeLens();
+      // No add(), no assess() — handleInstanceDisposal calls assessOneInstance
+      // with cached=false, which performs a fresh assess() during teardown.
+      fleet.register(lens, 'fresh');
+
+      const events: { finalReport: InstanceReport | null }[] = [];
+      fleet.on('instanceDisposed', (e) => { events.push(e); });
+
+      lens.dispose();
+
+      expect(events).toHaveLength(1);
+      expect(events[0]!.finalReport).not.toBeNull();
+      expect(events[0]!.finalReport!.status).toBe('ok');
+    });
+  });
+
+  // ── Serialization (cl-spec-012 §8, Gap 3) ────────────────────
+
+  describe('Serialization', () => {
+    it('snapshot returns the documented SerializedFleet shape', () => {
+      const lens = makeLens();
+      populateAndAssess(lens, 3);
+      fleet.register(lens, 'agent-1');
+
+      const state = fleet.snapshot();
+
+      expect(state.formatVersion).toBe('context-lens-fleet-snapshot-v1');
+      expect(typeof state.timestamp).toBe('number');
+      expect(state.fleetOptions).toEqual({ degradationThreshold: 0.5 });
+      expect(state.instances).toHaveLength(1);
+      expect(state.instances[0]!.label).toBe('agent-1');
+      expect(state.instances[0]!.snapshot).toBeDefined();
+      expect(state.instances[0]!.trackingState).toEqual({
+        activePatterns: [],
+        patternActivatedAt: {},
+        lastAssessedAt: null,
+      });
+      expect(state.fleetState).toEqual({ fleetDegradedState: false });
+    });
+
+    it('snapshot on an empty fleet produces an empty instances array', () => {
+      const state = fleet.snapshot();
+      expect(state.instances).toEqual([]);
+      expect(state.fleetState.fleetDegradedState).toBe(false);
+    });
+
+    it('snapshot preserves registration order', () => {
+      const a = makeLens(); const b = makeLens(); const c = makeLens();
+      fleet.register(b, 'b-second');
+      fleet.register(a, 'a-first-by-time');
+      fleet.register(c, 'c-third');
+
+      const state = fleet.snapshot();
+      expect(state.instances.map(e => e.label)).toEqual(['b-second', 'a-first-by-time', 'c-third']);
+    });
+
+    it('snapshot propagates includeContent=false to embedded instance snapshots', () => {
+      const lens = makeLens();
+      populateAndAssess(lens, 2);
+      fleet.register(lens, 'agent-1');
+
+      const state = fleet.snapshot({ includeContent: false });
+
+      expect(state.instances[0]!.snapshot.restorable).toBe(false);
+      for (const seg of state.instances[0]!.snapshot.segments) {
+        expect(seg.content).toBeNull();
+      }
+    });
+
+    it('snapshot captures fleetOptions verbatim', () => {
+      const customFleet = new ContextLensFleet({ degradationThreshold: 0.7 });
+      const lens = makeLens();
+      customFleet.register(lens, 'agent-1');
+      const state = customFleet.snapshot();
+      expect(state.fleetOptions.degradationThreshold).toBe(0.7);
+    });
+
+    it('round-trip restores label set, registration order, and fleet options', () => {
+      const a = makeLens(20000); const b = makeLens(15000);
+      populateAndAssess(a, 4);
+      populateAndAssess(b, 3, 4);
+      fleet.register(a, 'agent-a');
+      fleet.register(b, 'agent-b');
+
+      const state = fleet.snapshot();
+      const restored = ContextLensFleet.fromSnapshot(state, { default: {} });
+
+      expect(restored.size).toBe(2);
+      expect(restored.listInstances().map(i => i.label)).toEqual(['agent-a', 'agent-b']);
+      const aRestored = restored.get('agent-a')!;
+      const bRestored = restored.get('agent-b')!;
+      expect(aRestored.getCapacity().capacity).toBe(20000);
+      expect(bRestored.getCapacity().capacity).toBe(15000);
+      expect(aRestored.getSegmentCount()).toBe(4);
+      expect(bRestored.getSegmentCount()).toBe(3);
+    });
+
+    it('round-trip preserves the per-instance trackingState', () => {
+      const lens = makeLens();
+      populateAndAssess(lens, 3);
+      fleet.register(lens, 'agent-1');
+      // Trigger one assessFleet so lastAssessedAt is populated.
+      fleet.assessFleet();
+
+      const state = fleet.snapshot();
+      expect(state.instances[0]!.trackingState.lastAssessedAt).not.toBeNull();
+
+      const restored = ContextLensFleet.fromSnapshot(state, { default: {} });
+      const restoredInfo = restored.listInstances()[0]!;
+      expect(restoredInfo.lastAssessedAt).toBe(state.instances[0]!.trackingState.lastAssessedAt);
+    });
+
+    it('round-trip preserves fleetDegradedState', () => {
+      // Build a 2-instance fleet with low threshold so any active pattern
+      // pushes the fleet over the line. Force fleetDegradedState by pushing
+      // both instances over capacity to trigger saturation.
+      const customFleet = new ContextLensFleet({ degradationThreshold: 0.1 });
+      const a = makeLens(100); const b = makeLens(100);
+      // Each segment far longer than 100 tokens — saturation pattern fires.
+      const longContent = 'segment '.repeat(200);
+      a.add(longContent);
+      b.add(longContent);
+      a.assess();
+      b.assess();
+      customFleet.register(a, 'a');
+      customFleet.register(b, 'b');
+      // Drive fleet event detection.
+      customFleet.assessFleet();
+
+      const state = customFleet.snapshot();
+      // At a degradationThreshold of 0.1 with 2/2 saturated, fleetDegradedState
+      // should now be true.
+      expect(state.fleetState.fleetDegradedState).toBe(true);
+
+      const restored = ContextLensFleet.fromSnapshot(state, { default: {} });
+      // Re-assessing with the same state should NOT re-emit fleetDegraded
+      // because the cached state already reflects the degraded state.
+      const events: unknown[] = [];
+      restored.on('fleetDegraded', (p) => events.push(p));
+      restored.assessFleet();
+      expect(events).toHaveLength(0);
+    });
+
+    it('fromSnapshot rejects an unknown formatVersion with ConfigurationError', () => {
+      const state = fleet.snapshot();
+      const tampered = { ...state, formatVersion: 'foo-v0' as 'context-lens-fleet-snapshot-v1' };
+      expect(() => ContextLensFleet.fromSnapshot(tampered, { default: {} }))
+        .toThrow(/Unsupported fleet snapshot format/);
+    });
+
+    it('fromSnapshot rejects missing config.default with ValidationError', () => {
+      const state = fleet.snapshot();
+      // @ts-expect-error — intentionally bad input
+      expect(() => ContextLensFleet.fromSnapshot(state, {})).toThrow(ValidationError);
+      // @ts-expect-error — null config
+      expect(() => ContextLensFleet.fromSnapshot(state, null)).toThrow(ValidationError);
+    });
+
+    it('fromSnapshot rejects duplicate labels in the snapshot with ValidationError', () => {
+      const lens = makeLens();
+      populateAndAssess(lens, 2);
+      fleet.register(lens, 'agent-1');
+      const state = fleet.snapshot();
+      // Hand-craft a duplicate.
+      const tampered = {
+        ...state,
+        instances: [...state.instances, state.instances[0]!],
+      };
+      expect(() => ContextLensFleet.fromSnapshot(tampered, { default: {} }))
+        .toThrow(/Duplicate label in fleet snapshot/);
+    });
+
+    it('fromSnapshot dispatches perLabel config when present, default otherwise', () => {
+      const a = makeLens(8000); const b = makeLens(8000);
+      populateAndAssess(a, 2);
+      populateAndAssess(b, 2, 2);
+      fleet.register(a, 'specialised'); fleet.register(b, 'generic');
+
+      const state = fleet.snapshot();
+      const restored = ContextLensFleet.fromSnapshot(state, {
+        default: { capacity: 8000 },
+        perLabel: {
+          'specialised': { capacity: 16000 },  // override
+        },
+      });
+
+      expect(restored.get('specialised')!.getCapacity().capacity).toBe(16000);
+      expect(restored.get('generic')!.getCapacity().capacity).toBe(8000);
+    });
+
+    it('fromSnapshot decorates inner ContextLens.fromSnapshot failures with the offending label', () => {
+      const lens = makeLens();
+      populateAndAssess(lens, 1);
+      fleet.register(lens, 'agent-broken');
+
+      const state = fleet.snapshot();
+      // Sabotage one instance snapshot: drop restorable so ContextLens.fromSnapshot rejects it.
+      const tampered = {
+        ...state,
+        instances: state.instances.map(e => ({
+          ...e,
+          snapshot: { ...e.snapshot, restorable: false },
+        })),
+      };
+
+      expect(() => ContextLensFleet.fromSnapshot(tampered, { default: {} }))
+        .toThrow(/Fleet restore failed at instance "agent-broken"/);
+    });
+
+    it('snapshot after auto-unregister of a disposed instance succeeds (the disposed instance is gone)', () => {
+      const lens = makeLens();
+      fleet.register(lens, 'doomed');
+      lens.dispose();
+      // After auto-unregister, the fleet is empty.
+      expect(() => fleet.snapshot()).not.toThrow();
+      expect(fleet.snapshot().instances).toHaveLength(0);
     });
   });
 });

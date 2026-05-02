@@ -14,7 +14,21 @@ import type {
   CompactionRecord,
   PatternName,
   Severity,
+  CacheKind,
 } from './types.js';
+
+// ─── Lifecycle Event (cl-spec-015 §7.1) ───────────────────────────
+
+/**
+ * Emitted exactly once during step 2 of teardown — the final event an instance
+ * ever emits. Payload is constructed once, frozen, and shared across handlers.
+ * @see cl-spec-015 §7.1
+ */
+export type StateDisposedEvent = {
+  readonly type: 'stateDisposed';
+  readonly instanceId: string;
+  readonly timestamp: number;
+};
 
 // ─── Event Map ────────────────────────────────────────────────────
 
@@ -43,6 +57,15 @@ export interface ContextLensEventMap {
   stateRestored: { formatVersion: string; segmentCount: number; providerChanged: boolean; customPatternsRestored: number; customPatternsUnmatched: number };
   reportGenerated: { report: QualityReport };
   budgetViolation: { operation: string; selfTime: number; budgetTarget: number };
+  stateDisposed: StateDisposedEvent;
+  cachesCleared: {
+    kind: CacheKind;
+    entriesCleared: {
+      tokenizer: number;
+      embedding: number;
+      similarity: number;
+    };
+  };
 }
 
 // ─── Emitter ──────────────────────────────────────────────────────
@@ -94,5 +117,45 @@ export class EventEmitter<TMap> {
     } finally {
       this.emitting = false;
     }
+  }
+
+  /**
+   * Dispatch identical to `emit` except per-handler thrown values are pushed
+   * onto `errorLog` instead of being swallowed. Used exclusively by the
+   * teardown orchestrator for `stateDisposed` (cl-spec-015 §4.3); every
+   * other event uses `emit` and retains the swallow-and-log contract of
+   * cl-spec-007 §9.3.
+   * @see cl-spec-015 §4.3
+   */
+  emitCollect<E extends keyof TMap>(event: E, payload: TMap[E], errorLog: unknown[]): void {
+    if (this.emitting) {
+      console.warn(`[context-lens] Re-entrant emit detected for event "${String(event)}"`);
+    }
+
+    const set = this.handlers.get(event);
+    if (set === undefined || set.size === 0) return;
+
+    this.emitting = true;
+    try {
+      for (const handler of set) {
+        try {
+          (handler as Handler<TMap[E]>)(payload);
+        } catch (error) {
+          errorLog.push(error);
+        }
+      }
+    } finally {
+      this.emitting = false;
+    }
+  }
+
+  /**
+   * Detach every handler from every event. Used by the teardown orchestrator
+   * during step 5 of cl-spec-015 §4.1 to release the registry's strong
+   * references to handler closures. Idempotent — repeated calls are no-ops.
+   * @see cl-spec-015 §4.1
+   */
+  removeAllListeners(): void {
+    this.handlers.clear();
   }
 }

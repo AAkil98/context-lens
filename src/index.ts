@@ -22,12 +22,19 @@ import type {
   BaselineSnapshot,
   SerializedState,
   SerializedConfig,
+  IntegrationTeardown,
+  IntegrationHandle,
+  LifecycleState,
+  CacheKind,
+  MemoryUsage,
 } from './types.js';
 import {
   ConfigurationError,
+  DisposalError,
   ValidationError,
 } from './errors.js';
 import { EventEmitter, type ContextLensEventMap } from './events.js';
+import { IntegrationRegistry, guardDispose, runTeardown } from './lifecycle.js';
 import { Tokenizer } from './tokenizer.js';
 import { SegmentStore, type AddOptions, type UpdateChanges, type RestoreOptions, type CreateGroupOptions, type DuplicateSignal } from './segment-store.js';
 import { EmbeddingEngine } from './embedding.js';
@@ -58,6 +65,13 @@ export interface ContextLensConfig {
   hysteresisMargin?: number;
   tokenCacheSize?: number;
   embeddingCacheSize?: number;
+  /**
+   * Maximum entries in the pairwise similarity cache. Defaults to a value
+   * scaled with `capacity` per cl-spec-016 §2.1 — clamped to [16384, 65536].
+   * Set to 0 to disable the cache (cl-spec-007 §8.9.2 + cl-spec-016 §5.1).
+   * Runtime resize via `setCacheSize('similarity', N)` (cl-spec-007 §8.9.2).
+   */
+  similarityCacheSize?: number;
   customPatterns?: PatternDefinition[];
 }
 
@@ -70,6 +84,44 @@ export interface SeedInput {
   tags?: string[];
   groupId?: string;
 }
+
+// ─── Module-level state ───────────────────────────────────────────
+
+/** Process-wide monotonic counter for {@link ContextLens.instanceId}. @see cl-spec-015 §2.5 */
+let INSTANCE_COUNTER = 0;
+
+/**
+ * Default similarity cache size scaled with capacity per cl-spec-016 §2.1.
+ * Clamped to [16384, 65536] — lower bound preserves v0.1.0 behavior at small
+ * capacities; upper bound caps memory footprint at ~5.2 MB (80 bytes/entry).
+ *
+ * @see cl-spec-016 §2.1
+ */
+function defaultSimilarityCacheSize(capacity: number): number {
+  const computed = Math.ceil(Math.sqrt(capacity / 200) * 16384);
+  return Math.max(16384, Math.min(65536, computed));
+}
+
+/**
+ * Valid CacheKind values for {@link ContextLens.clearCaches}. Includes 'all'.
+ * @see cl-spec-007 §8.9
+ */
+const CACHE_KINDS: ReadonlySet<CacheKind> = new Set<CacheKind>([
+  'tokenizer',
+  'embedding',
+  'similarity',
+  'all',
+]);
+
+/**
+ * Valid CacheKind values for {@link ContextLens.setCacheSize} — 'all' is excluded
+ * because each cache has different practical size ranges (cl-spec-007 §8.9.2).
+ */
+const SETTABLE_CACHE_KINDS: ReadonlySet<Exclude<CacheKind, 'all'>> = new Set<Exclude<CacheKind, 'all'>>([
+  'tokenizer',
+  'embedding',
+  'similarity',
+]);
 
 // ─── ContextLens ──────────────────────────────────────────────────
 
@@ -98,6 +150,18 @@ export class ContextLens {
   private seeded = false;
   private hasAdds = false;
 
+  // ── Lifecycle (cl-spec-015) ─────────────────────────────────
+  private lifecycleState: LifecycleState = 'live';
+  private readonly integrations = new IntegrationRegistry<ContextLens>();
+  /**
+   * Stable instance identifier of the form `cl-N-xxxxxx`. Generated once at
+   * construction; valid in all lifecycle states (live, disposing, disposed).
+   * Same value flows to `stateDisposed` event payloads, `DisposedError`
+   * messages, and integration teardown notifications.
+   * @see cl-spec-015 §2.5, §7.1, §7.2
+   */
+  readonly instanceId: string;
+
   /**
    * Create a new ContextLens instance for monitoring a single context window.
    * @param config - Configuration with required `capacity` (token budget) and optional providers.
@@ -108,44 +172,48 @@ export class ContextLens {
     // Step 1: Validate config
     this.validateConfig(config);
 
-    // Step 2: Deep-copy config
+    // Step 2: Generate stable instance identifier (cl-spec-015 §2.5)
+    this.instanceId = `cl-${++INSTANCE_COUNTER}-${Math.random().toString(36).slice(2, 8)}`;
+
+    // Step 3: Deep-copy config
     this.configSnapshot = deepCopy(config);
     this.capacity = config.capacity;
 
-    // Step 3: Capture construction timestamp
+    // Step 4: Capture construction timestamp
     this.constructionTimestamp = Date.now();
 
-    // Step 4: Create event emitter
+    // Step 5: Create event emitter
     this.emitter = new EventEmitter<ContextLensEventMap>();
 
-    // Step 5: Create tokenizer
+    // Step 6: Create tokenizer
     this.tokenizer = new Tokenizer(
       config.tokenizer ?? 'approximate',
       undefined,
       config.tokenCacheSize ?? 4096,
     );
 
-    // Step 6: Create segment store
+    // Step 7: Create segment store
     this.store = new SegmentStore(
       this.tokenizer,
       this.emitter,
       config.retainEvictedContent ?? true,
     );
 
-    // Step 7: Create embedding engine
+    // Step 8: Create embedding engine
     this.embedding = new EmbeddingEngine(
       config.embeddingCacheSize ?? 4096,
       (content: string) => this.tokenizer.count(content),
     );
 
-    // Step 8: Create similarity engine
-    this.similarity = new SimilarityEngine();
+    // Step 9: Create similarity engine — sized per cl-spec-016 §2.1
+    const similarityCacheSize = config.similarityCacheSize ?? defaultSimilarityCacheSize(config.capacity);
+    this.similarity = new SimilarityEngine(similarityCacheSize);
     this.similarity.setEmbeddingLookup(this.embedding);
 
-    // Step 9: Create task manager
+    // Step 10: Create task manager
     this.taskManager = new TaskManager();
 
-    // Step 10: Create scoring/report modules
+    // Step 11: Create scoring/report modules
     this.continuity = new ContinuityTracker();
     this.baseline = new BaselineManager();
     this.reportAssembler = new QualityReportAssembler(
@@ -156,7 +224,7 @@ export class ContextLens {
       this.baseline,
     );
 
-    // Step 11: Create detection engine
+    // Step 12: Create detection engine
     const detectionConfig: DetectionConfig = {};
     if (config.patternThresholds != null) detectionConfig.thresholds = config.patternThresholds;
     if (config.suppressedPatterns != null) detectionConfig.suppressedPatterns = config.suppressedPatterns;
@@ -164,16 +232,16 @@ export class ContextLens {
     if (config.customPatterns != null) detectionConfig.customPatterns = config.customPatterns;
     this.detection = new DetectionEngine(detectionConfig);
 
-    // Step 12: Create eviction advisory
+    // Step 13: Create eviction advisory
     this.evictionAdvisory = new EvictionAdvisory({
       store: this.store,
       similarity: this.similarity,
     });
 
-    // Step 13: Create performance module
+    // Step 14: Create performance module
     this.perf = new PerformanceInstrumentation();
 
-    // Step 14: Create diagnostics module
+    // Step 15: Create diagnostics module
     this.diagnosticsManager = new DiagnosticsManager({
       emitter: this.emitter,
       perf: this.perf,
@@ -216,8 +284,98 @@ export class ContextLens {
       }
     }
 
+    if (config.similarityCacheSize !== undefined) {
+      if (!Number.isInteger(config.similarityCacheSize) || config.similarityCacheSize < 0) {
+        throw new ConfigurationError(
+          'similarityCacheSize must be a non-negative integer',
+          { similarityCacheSize: config.similarityCacheSize },
+        );
+      }
+    }
+
     if (config.retainEvictedContent !== undefined && typeof config.retainEvictedContent !== 'boolean') {
       throw new ConfigurationError('retainEvictedContent must be a boolean');
+    }
+  }
+
+  // ── Lifecycle (cl-spec-015 §2.5, §6.2) ──────────────────────────
+
+  /** True once `dispose()` has completed successfully. Never throws. */
+  get isDisposed(): boolean {
+    return this.lifecycleState === 'disposed';
+  }
+
+  /** True while a `dispose()` call is on the stack. Never throws. */
+  get isDisposing(): boolean {
+    return this.lifecycleState === 'disposing';
+  }
+
+  /**
+   * Attach a lifecycle-aware integration's teardown callback. Internal entry
+   * point for `ContextLensFleet` (cl-spec-012) and `ContextLensExporter`
+   * (cl-spec-013); not part of the documented public API.
+   *
+   * Returns an `IntegrationHandle` whose `detach()` removes the callback
+   * without firing it. Throws `DisposedError` if the instance is disposed
+   * or currently disposing.
+   *
+   * @internal
+   * @see cl-spec-015 §6.2
+   */
+  attachIntegration(callback: IntegrationTeardown<ContextLens>): IntegrationHandle {
+    guardDispose(this.lifecycleState, 'attachIntegration', this.instanceId);
+    return this.integrations.attach(callback);
+  }
+
+  /**
+   * Release every resource the instance holds and transition to the terminal
+   * `disposed` state. Idempotent (subsequent calls are no-ops) and reentrant-
+   * safe (a `stateDisposed` handler that calls `dispose()` again returns
+   * immediately via the disposing flag). Always-valid: never calls
+   * {@link guardDispose} on itself.
+   *
+   * Six-step teardown sequence delegated to {@link runTeardown}:
+   * 1. Set lifecycle state to `disposing`.
+   * 2. Emit `stateDisposed` via `emitCollect` (handler errors aggregated).
+   * 3. Invoke registered integration teardown callbacks.
+   * 4. Clear owned resources (caches, ledger, ring buffers, segment store).
+   * 5. Detach the emitter and the integration registry.
+   * 6. Set lifecycle state to `disposed`.
+   *
+   * Throws {@link DisposalError} only if one or more handler or integration
+   * callbacks threw during steps 2–3. The instance is fully disposed by the
+   * time the error propagates — disposal is never rolled back.
+   *
+   * @see cl-spec-015 §3, §4.1
+   */
+  dispose(): void {
+    if (this.lifecycleState === 'disposed') return;   // idempotent post-disposal
+    if (this.lifecycleState === 'disposing') return;  // reentrant-safe
+
+    const errorLog = runTeardown<ContextLens>({
+      setState: (s) => { this.lifecycleState = s; },
+      emitter: this.emitter,
+      integrations: this.integrations,
+      instance: this,
+      payloadFactory: () => Object.freeze({
+        type: 'stateDisposed' as const,
+        instanceId: this.instanceId,
+        timestamp: Date.now(),
+      }),
+      clearResources: () => {
+        this.store.clear();
+        this.tokenizer.clearCache();
+        this.embedding.clearCache();
+        this.similarity.clearCache();
+        this.continuity.clear();
+        this.diagnosticsManager.clear();
+        this.cachedReport = null;
+        this.qualityCacheValid = false;
+      },
+    });
+
+    if (errorLog.length > 0) {
+      throw new DisposalError(this.instanceId, errorLog);
     }
   }
 
@@ -230,6 +388,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   seed(segments: SeedInput[]): Segment[] {
+    guardDispose(this.lifecycleState, 'seed', this.instanceId);
     if (segments.length === 0) return [];
 
     // Defensive copy
@@ -282,6 +441,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   add(content: string, options?: AddOptions): Segment | DuplicateSignal {
+    guardDispose(this.lifecycleState, 'add', this.instanceId);
     const opts = options !== undefined ? deepCopy(options) : undefined;
 
     // First add after seed: capture baseline
@@ -312,6 +472,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   update(id: string, changes: UpdateChanges): Segment {
+    guardDispose(this.lifecycleState, 'update', this.instanceId);
     const changesCopy = deepCopy(changes);
     const result = this.store.update(id, changesCopy);
 
@@ -333,6 +494,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   replace(id: string, newContent: string, options?: Partial<Pick<AddOptions, 'importance' | 'origin' | 'tags'>>): Segment {
+    guardDispose(this.lifecycleState, 'replace', this.instanceId);
     const opts = options !== undefined ? deepCopy(options) : undefined;
     const result = this.store.replace(id, newContent, opts);
 
@@ -353,6 +515,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   compact(id: string, summary: string): Segment {
+    guardDispose(this.lifecycleState, 'compact', this.instanceId);
     const seg = this.store.getSegment(id);
     const prevTokenCount = seg?.tokenCount ?? 0;
 
@@ -386,6 +549,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   split(id: string, splitFn: (content: string) => string[]): Segment[] {
+    guardDispose(this.lifecycleState, 'split', this.instanceId);
     const results = this.store.split(id, splitFn);
 
     // Prepare embeddings for children
@@ -408,6 +572,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   evict(id: string, reason?: string): EvictionRecord | EvictionRecord[] {
+    guardDispose(this.lifecycleState, 'evict', this.instanceId);
     const records = this.store.evict(id, reason);
 
     // Record each eviction in continuity ledger
@@ -436,6 +601,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.1
    */
   restore(id: string, options?: RestoreOptions): Segment | Segment[] {
+    guardDispose(this.lifecycleState, 'restore', this.instanceId);
     const opts = options !== undefined ? deepCopy(options) : undefined;
     const results = this.store.restore(id, opts);
 
@@ -467,6 +633,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.2
    */
   createGroup(groupId: string, segmentIds: string[], options?: CreateGroupOptions): Group {
+    guardDispose(this.lifecycleState, 'createGroup', this.instanceId);
     const opts = options !== undefined ? deepCopy(options) : undefined;
     const result = this.store.createGroup(groupId, segmentIds, opts);
     return deepCopy(result);
@@ -478,6 +645,7 @@ export class ContextLens {
    * @see cl-spec-007 §5.2
    */
   dissolveGroup(groupId: string): Segment[] {
+    guardDispose(this.lifecycleState, 'dissolveGroup', this.instanceId);
     const group = this.store.getGroup(groupId);
     if (group === undefined) {
       throw new ValidationError(`Group not found: ${groupId}`);
@@ -489,12 +657,14 @@ export class ContextLens {
 
   /** Get a group by ID. Returns null if not found. */
   getGroup(groupId: string): Group | null {
+    guardDispose(this.lifecycleState, 'getGroup', this.instanceId);
     const group = this.store.getGroup(groupId);
     return group !== undefined ? deepCopy(group) : null;
   }
 
   /** List all active groups. */
   listGroups(): Group[] {
+    guardDispose(this.lifecycleState, 'listGroups', this.instanceId);
     return this.store.listGroups().map(g => deepCopy(g));
   }
 
@@ -502,22 +672,26 @@ export class ContextLens {
 
   /** Get a segment by ID (active or evicted). Returns null if not found. */
   getSegment(id: string): Segment | null {
+    guardDispose(this.lifecycleState, 'getSegment', this.instanceId);
     const seg = this.store.getSegment(id);
     return seg !== undefined ? deepCopy(seg) : null;
   }
 
   /** Get count of active segments. */
   getSegmentCount(): number {
+    guardDispose(this.lifecycleState, 'getSegmentCount', this.instanceId);
     return this.store.segmentCount;
   }
 
   /** List all active segments in order. */
   listSegments(): Segment[] {
+    guardDispose(this.lifecycleState, 'listSegments', this.instanceId);
     return this.store.getOrderedActiveSegments().map(s => deepCopy(s));
   }
 
   /** Get current capacity metrics. */
   getCapacity(): CapacityReport {
+    guardDispose(this.lifecycleState, 'getCapacity', this.instanceId);
     return deepCopy(this.computeCapacity());
   }
 
@@ -529,6 +703,7 @@ export class ContextLens {
     event: E,
     handler: (payload: ContextLensEventMap[E]) => void,
   ): () => void {
+    guardDispose(this.lifecycleState, 'on', this.instanceId);
     return this.emitter.on(event, handler);
   }
 
@@ -542,6 +717,7 @@ export class ContextLens {
    * @see cl-spec-003 (degradation patterns)
    */
   assess(): QualityReport {
+    guardDispose(this.lifecycleState, 'assess', this.instanceId);
     // Step 1: Check cache
     if (this.qualityCacheValid && this.cachedReport !== null) {
       return deepCopy(this.cachedReport);
@@ -603,6 +779,7 @@ export class ContextLens {
    * @see cl-spec-008
    */
   planEviction(options?: PlanOptions): EvictionPlan {
+    guardDispose(this.lifecycleState, 'planEviction', this.instanceId);
     // Ensure a report exists
     if (this.cachedReport === null) {
       this.assess();
@@ -617,6 +794,133 @@ export class ContextLens {
     return deepCopy(plan);
   }
 
+  // ── Memory Management (cl-spec-007 §8.9) ───────────────────────
+
+  /**
+   * Empty one or more derived caches. The segment store, baseline, continuity
+   * ledger, pattern history, report history, and any other history buffer are
+   * untouched — `clearCaches` is purely a memoization-layer primitive.
+   *
+   * For `'tokenizer'`: drops cached counts; segments retain their stored
+   * `tokenCount`. For `'embedding'`: drops cached vectors / trigram sets; the
+   * next `assess()` re-prepares content. For `'similarity'`: drops cached
+   * pairwise scores; the next `assess()` recomputes them. For `'all'`: clears
+   * all three.
+   *
+   * Emits one `cachesCleared` event with a per-cache `entriesCleared`
+   * breakdown — useful for ops dashboards and pre/post memory comparisons.
+   *
+   * @param kind Defaults to `'all'`.
+   * @throws ValidationError if `kind` is not a recognized CacheKind.
+   * @throws DisposedError if the instance is disposed.
+   * @see cl-spec-007 §8.9.1, cl-spec-009 §6.5
+   */
+  clearCaches(kind: CacheKind = 'all'): void {
+    guardDispose(this.lifecycleState, 'clearCaches', this.instanceId);
+    if (!CACHE_KINDS.has(kind)) {
+      throw new ValidationError(`Unknown cache kind: ${kind}`, { kind });
+    }
+
+    const entriesCleared = { tokenizer: 0, embedding: 0, similarity: 0 };
+
+    if (kind === 'tokenizer' || kind === 'all') {
+      entriesCleared.tokenizer = this.tokenizer.getEntryCount();
+      this.tokenizer.clearCache();
+    }
+    if (kind === 'embedding' || kind === 'all') {
+      entriesCleared.embedding = this.embedding.getEntryCount();
+      this.embedding.clearCache();
+    }
+    if (kind === 'similarity' || kind === 'all') {
+      entriesCleared.similarity = this.similarity.getEntryCount();
+      this.similarity.clearCache();
+    }
+
+    this.emitter.emit('cachesCleared', { kind, entriesCleared });
+  }
+
+  /**
+   * Resize a single cache's maximum-entry capacity at runtime. Shrinks evict
+   * least-recently-used entries until the new bound is satisfied; grows leave
+   * existing entries unchanged. `size = 0` disables the cache.
+   *
+   * Does not emit `cachesCleared` even when shrinking causes evictions —
+   * resize is a configuration change, not an explicit clear.
+   *
+   * @throws ValidationError if `kind` is not one of `'tokenizer'`,
+   *   `'embedding'`, `'similarity'`, or if `size` is not a non-negative integer.
+   * @throws DisposedError if the instance is disposed.
+   * @see cl-spec-007 §8.9.2, cl-spec-009 §6.5
+   */
+  setCacheSize(kind: Exclude<CacheKind, 'all'>, size: number): void {
+    guardDispose(this.lifecycleState, 'setCacheSize', this.instanceId);
+    if ((kind as CacheKind) === 'all') {
+      throw new ValidationError(
+        "setCacheSize: 'all' is not permitted; specify one of 'tokenizer' | 'embedding' | 'similarity'",
+        { kind },
+      );
+    }
+    if (!SETTABLE_CACHE_KINDS.has(kind)) {
+      throw new ValidationError(`Unknown cache kind: ${kind}`, { kind });
+    }
+    if (!Number.isInteger(size) || size < 0) {
+      throw new ValidationError('setCacheSize: size must be a non-negative integer', { size });
+    }
+
+    switch (kind) {
+      case 'tokenizer':
+        this.tokenizer.setCacheSize(size);
+        break;
+      case 'embedding':
+        this.embedding.setCacheSize(size);
+        break;
+      case 'similarity':
+        this.similarity.setCacheSize(size);
+        break;
+    }
+  }
+
+  /**
+   * Estimate of the instance's current cache memory consumption. Read-only;
+   * does not trigger any computation. The byte figures use the per-entry
+   * coefficients documented in cl-spec-009 §6.5 (typical error band ±20%).
+   *
+   * @throws DisposedError if the instance is disposed.
+   * @see cl-spec-007 §8.9.3, cl-spec-009 §6.5
+   */
+  getMemoryUsage(): MemoryUsage {
+    guardDispose(this.lifecycleState, 'getMemoryUsage', this.instanceId);
+
+    const tokenizerEntries = this.tokenizer.getEntryCount();
+    const embeddingEntries = this.embedding.getEntryCount();
+    const similarityEntries = this.similarity.getEntryCount();
+
+    const tokenizerBytes = tokenizerEntries * 100;
+    const embeddingBytes = embeddingEntries * this.embedding.getEntryByteEstimate();
+    const similarityBytes = similarityEntries * 80;
+
+    const totalEstimatedBytes = tokenizerBytes + embeddingBytes + similarityBytes;
+
+    return {
+      tokenizer: {
+        entries: tokenizerEntries,
+        maxEntries: this.tokenizer.getMaxEntries(),
+        estimatedBytes: tokenizerBytes,
+      },
+      embedding: {
+        entries: embeddingEntries,
+        maxEntries: this.embedding.getMaxEntries(),
+        estimatedBytes: embeddingBytes,
+      },
+      similarity: {
+        entries: similarityEntries,
+        maxEntries: this.similarity.getMaxEntries(),
+        estimatedBytes: similarityBytes,
+      },
+      totalEstimatedBytes,
+    };
+  }
+
   // ── Task Operations ─────────────────────────────────────────────
 
   /**
@@ -626,6 +930,7 @@ export class ContextLens {
    * @see cl-spec-004
    */
   async setTask(descriptor: TaskDescriptor): Promise<TaskTransition> {
+    guardDispose(this.lifecycleState, 'setTask', this.instanceId);
     const desc = deepCopy(descriptor);
     const transition = await this.taskManager.setTask(desc, this.similarity, this.embedding);
 
@@ -642,6 +947,7 @@ export class ContextLens {
 
   /** Clear the current task. */
   clearTask(): void {
+    guardDispose(this.lifecycleState, 'clearTask', this.instanceId);
     if (!this.taskManager.isActive()) return;
 
     this.taskManager.clearTask();
@@ -652,12 +958,14 @@ export class ContextLens {
 
   /** Get the current task descriptor, or null. */
   getTask(): TaskDescriptor | null {
+    guardDispose(this.lifecycleState, 'getTask', this.instanceId);
     const task = this.taskManager.getCurrentTask();
     return task !== null ? deepCopy(task) : null;
   }
 
   /** Get full task lifecycle state. */
   getTaskState(): TaskState {
+    guardDispose(this.lifecycleState, 'getTaskState', this.instanceId);
     return deepCopy(this.taskManager.getState());
   }
 
@@ -668,6 +976,7 @@ export class ContextLens {
    * @see cl-spec-006
    */
   setTokenizer(provider: TokenizerProvider | 'approximate', metadata?: TokenizerMetadata): void {
+    guardDispose(this.lifecycleState, 'setTokenizer', this.instanceId);
     const result = this.tokenizer.switchProvider(provider, metadata, {
       getActiveSegments: () => this.store.getActiveSegmentIterator(),
       setSegmentTokenCount: (id: string, tokenCount: number) => {
@@ -689,6 +998,7 @@ export class ContextLens {
     provider: EmbeddingProvider | null,
     metadata?: EmbeddingProviderMetadata,
   ): Promise<void> {
+    guardDispose(this.lifecycleState, 'setEmbeddingProvider', this.instanceId);
     if (provider === null) {
       const result = this.embedding.removeProvider(() => {
         this.similarity.clearCache();
@@ -712,11 +1022,13 @@ export class ContextLens {
 
   /** Get tokenizer info. */
   getTokenizerInfo(): TokenizerMetadata {
+    guardDispose(this.lifecycleState, 'getTokenizerInfo', this.instanceId);
     return deepCopy(this.tokenizer.getInfo());
   }
 
   /** Get embedding provider info, or null if in trigram mode. */
   getEmbeddingProviderInfo(): EmbeddingProviderMetadata | null {
+    guardDispose(this.lifecycleState, 'getEmbeddingProviderInfo', this.instanceId);
     const meta = this.embedding.getProviderMetadata();
     return meta !== null ? deepCopy(meta) : null;
   }
@@ -725,6 +1037,7 @@ export class ContextLens {
 
   /** Update the token capacity. */
   setCapacity(newCapacity: number): void {
+    guardDispose(this.lifecycleState, 'setCapacity', this.instanceId);
     if (!Number.isInteger(newCapacity) || newCapacity <= 0) {
       throw new ValidationError('Capacity must be a positive integer', { capacity: newCapacity });
     }
@@ -744,6 +1057,7 @@ export class ContextLens {
    * @see cl-spec-003 §10
    */
   registerPattern(definition: PatternDefinition): void {
+    guardDispose(this.lifecycleState, 'registerPattern', this.instanceId);
     const def = deepCopy(definition);
     this.detection.registerPattern(def);
     this.emitter.emit('customPatternRegistered', { name: def.name, description: def.description });
@@ -753,6 +1067,7 @@ export class ContextLens {
 
   /** Get the quality baseline snapshot, or null if not captured. */
   getBaseline(): BaselineSnapshot | null {
+    guardDispose(this.lifecycleState, 'getBaseline', this.instanceId);
     const snap = this.baseline.getSnapshot();
     return snap !== null ? deepCopy(snap) : null;
   }
@@ -763,31 +1078,37 @@ export class ContextLens {
    * @see cl-spec-010
    */
   getDiagnostics(): DiagnosticSnapshot {
+    guardDispose(this.lifecycleState, 'getDiagnostics', this.instanceId);
     return this.diagnosticsManager.getDiagnostics();
   }
 
   /** Get the session start timestamp. */
   getConstructionTimestamp(): number {
+    guardDispose(this.lifecycleState, 'getConstructionTimestamp', this.instanceId);
     return this.constructionTimestamp;
   }
 
   /** Get the config used to construct this instance. */
   getConfig(): ContextLensConfig {
+    guardDispose(this.lifecycleState, 'getConfig', this.instanceId);
     return deepCopy(this.configSnapshot);
   }
 
   /** Get evicted segments. */
   getEvictedSegments(): Segment[] {
+    guardDispose(this.lifecycleState, 'getEvictedSegments', this.instanceId);
     return this.store.getEvictedSegments().map(s => deepCopy(s));
   }
 
   /** Get performance instrumentation module (for diagnostics). */
   getPerformance(): PerformanceInstrumentation {
+    guardDispose(this.lifecycleState, 'getPerformance', this.instanceId);
     return this.perf;
   }
 
   /** Get detection engine (for diagnostics). */
   getDetection(): DetectionEngine {
+    guardDispose(this.lifecycleState, 'getDetection', this.instanceId);
     return this.detection;
   }
 
@@ -865,6 +1186,7 @@ export class ContextLens {
    * @see cl-spec-014
    */
   snapshot(options?: { includeContent?: boolean }): SerializedState {
+    guardDispose(this.lifecycleState, 'snapshot', this.instanceId);
     const includeContent = options?.includeContent ?? true;
     const now = Date.now();
     const restorable = includeContent;
@@ -917,6 +1239,7 @@ export class ContextLens {
       hysteresisMargin: this.configSnapshot.hysteresisMargin ?? 0.03,
       tokenCacheSize: this.configSnapshot.tokenCacheSize ?? 4096,
       embeddingCacheSize: this.configSnapshot.embeddingCacheSize ?? 4096,
+      similarityCacheSize: this.similarity.getMaxEntries(),
     };
 
     // Provider metadata
@@ -1009,6 +1332,10 @@ export class ContextLens {
       tokenCacheSize: state.config.tokenCacheSize,
       embeddingCacheSize: state.config.embeddingCacheSize,
     };
+    if (state.config.similarityCacheSize !== undefined) {
+      mergedConfig.similarityCacheSize = state.config.similarityCacheSize;
+    }
+    // Else: omitted — constructor falls back to defaultSimilarityCacheSize(capacity).
     if (restoreConfig?.embeddingProvider !== undefined) {
       mergedConfig.embeddingProvider = restoreConfig.embeddingProvider;
     }
@@ -1143,10 +1470,12 @@ export {
   SplitError,
   RestoreError,
   ProviderError,
+  DisposedError,
+  DisposalError,
 } from './errors.js';
 
 // Event map type — consumers need this for typed event handlers
-export type { ContextLensEventMap } from './events.js';
+export type { ContextLensEventMap, StateDisposedEvent } from './events.js';
 
 // Types from internal modules used in public method signatures
 export type { AddOptions, UpdateChanges, RestoreOptions, CreateGroupOptions, DuplicateSignal } from './segment-store.js';

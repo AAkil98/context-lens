@@ -783,4 +783,19 @@ export class SegmentStore {
       });
     }
   }
+
+  /**
+   * Reset all segment, group, and position state. Used by the teardown
+   * orchestrator (step 4). The tokenizer, emitter, and `retainEvictedContent`
+   * config reference stay attached — the store remains structurally
+   * functional but holds no data. No events are emitted on clear; teardown
+   * is silent except for the canonical `stateDisposed` event in step 2.
+   * @see cl-spec-015 §4.1
+   */
+  clear(): void {
+    this.active.clear();
+    this.evicted.clear();
+    this.groups.clear();
+    this.nextPosition = 0;
+  }
 }

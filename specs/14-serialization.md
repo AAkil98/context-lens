@@ -2,12 +2,12 @@
 id: cl-spec-014
 title: Serialization
 type: design
-status: draft
+status: complete
 created: 2026-04-04
-revised: 2026-04-04
-authors: [Akil Abderrahim, Claude Opus 4.6]
-tags: [serialization, snapshot, restore, persistence, replay, export, state]
-depends_on: [cl-spec-007, cl-spec-011]
+revised: 2026-05-02
+authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
+tags: [serialization, snapshot, restore, persistence, replay, export, state, lifecycle]
+depends_on: [cl-spec-007, cl-spec-011, cl-spec-015]
 ---
 
 # Serialization
@@ -30,13 +30,15 @@ depends_on: [cl-spec-007, cl-spec-011]
 
 context-lens is session-scoped. Instance state — segments, scores, patterns, history — lives in memory for the session's duration. When the process exits, the state is gone. This is by design: persistence adds complexity, and most callers do not need it. But some do.
 
-Three use cases motivate opt-in serialization:
+Four use cases motivate opt-in serialization:
 
 1. **Restart recovery.** A long-running agent saves context-lens state before shutdown and restores it after restart. The agent continues from where it left off — segments, baseline, pattern history, continuity ledger all intact. Without serialization, the agent would need to replay every segment addition and task change from scratch.
 
 2. **Debugging replay.** A developer exports a session's full state for post-mortem analysis. The snapshot contains everything needed to reconstruct the instance — the developer can load it in a test environment, call `assess()`, and reproduce the exact quality report and pattern detection that the production session experienced.
 
 3. **Analytics export.** A monitoring system collects periodic state snapshots from multiple context-lens instances (via cl-spec-012 Fleet Monitor or directly) and ships them to a data warehouse. The snapshots capture the quality trajectory, pattern history, and operational metrics of each session. For analytics, segment content is often unnecessary or sensitive — a lightweight snapshot omits content for cheaper transport and safe sharing.
+
+4. **State-preserving continuation across disposal.** A long-running caller that needs to release the resources held by a `ContextLens` instance — caches, ring buffers, event handlers, integration back-references — calls `snapshot()` before `dispose()` (cl-spec-015), then constructs a fresh instance from the snapshot via `fromSnapshot()` once the original has been torn down. This is the **only** continuation path across a `dispose()`: a disposed instance cannot be reactivated (cl-spec-015 §2.3), and its accumulated state is cleared in step 4 of teardown. The snapshot is the rescue path for callers who want lifecycle hygiene without losing accumulated context.
 
 This spec defines how instance state is serialized to a portable, JSON-safe format and how that format is restored into a functional instance. It is the only path for state persistence — there is no other mechanism for saving and loading context-lens state.
 
@@ -131,11 +133,29 @@ The `sizeEstimate` is an approximate byte count of the serialized output (comput
 
 This means `snapshot()` can be called at any point during a session — between mutations, between assessments, during a burst of operations — without affecting the instance's behavior. The caller does not need to plan around snapshot timing.
 
+Because `snapshot()` is read-only, it is governed by the **read-only-during-disposal rule** of cl-spec-015 §3.4. A `snapshot()` call from inside a `stateDisposed` handler (cl-spec-007 §10.2) or from inside an integration teardown callback (cl-spec-015 §6.2) executes per its live specification — `isDisposing === true`, `isDisposed === false`, backing state intact (step 4 of teardown has not yet run). After the disposed flag is set in step 6, `snapshot()` throws `DisposedError` like every other public method except `dispose`, `isDisposed`, and `isDisposing`. Callers who anticipate possible continuation across disposal should capture the snapshot **before** calling `dispose()`; the snapshot-then-dispose-then-fromSnapshot pattern is the supported continuation idiom (section 3.4).
+
 ### 3.3 Multiple Snapshots
 
 Multiple snapshots can be taken from the same instance at different points. Each is an independent copy of the state at its capture time. There is no relationship between snapshots — they do not reference each other, and restoring one does not affect others.
 
 A caller who wants a quality timeline can take a snapshot after each `assess()` call, building a sequence of state captures over time. Each snapshot includes the full state, not a diff — there is no incremental snapshot mechanism.
+
+### 3.4 Snapshot-then-dispose continuation
+
+The state-preserving continuation pattern across `dispose()` (cl-spec-015) is:
+
+```ts
+const snap = oldLens.snapshot();
+oldLens.dispose();
+const newLens = ContextLens.fromSnapshot(snap, { tokenizer, embedder });
+```
+
+The new instance from `fromSnapshot` is independent of the disposed one (section 5.5) — they share no state, no registry, no integration attachments. Event subscribers, fleet registrations (cl-spec-012), and OTel exporter subscriptions (cl-spec-013) attached to the disposed instance must be re-attached to the new instance if the caller wants them to observe ongoing activity on the new context window.
+
+Ordering matters: `snapshot()` must be called **before** `dispose()`. After `dispose()` returns, `snapshot()` on the disposed instance throws `DisposedError` (cl-spec-015 §5.1) — the data needed to reconstruct the instance has already been cleared in step 4 of teardown. There is no recovery path if disposal happens first; the cost of a precautionary snapshot before disposal is one allocation that the caller can discard if not needed.
+
+The snapshot-and-dispose pattern is also valid from inside the `dispose()` call's handler/callback chain (read-only-during-disposal rule), but the more common idiom is to capture the snapshot in normal session flow before invoking `dispose()`. Capturing inside teardown callbacks is appropriate when an integration (a fleet, an exporter) wants to persist its view of the instance's final state as part of its own teardown work.
 
 ---
 
@@ -342,7 +362,11 @@ After restore, the instance is fully functional:
 - **`getDiagnostics()`** returns a snapshot that includes both pre-restore history (from the snapshot) and post-restore activity.
 - **`getDiagnostics().latestReport`** is null until the first `assess()` call, even if the original instance had generated reports. Quality reports are not serialized — they are recomputed on demand.
 
-**External integrations.** Event handlers, fleet registrations, and OTel exporter subscriptions are not serialized or restored. Callers must re-attach these after `fromSnapshot()`. The restored instance's event system starts with no subscribers.
+**External integrations.** Event handlers and OTel exporter subscriptions are not serialized or restored. Callers must re-attach these after `fromSnapshot()`. The restored instance's event system starts with no subscribers. This is the same boundary that `dispose()` enforces (cl-spec-015 §5.4) — integration attachments are caller-managed across both the snapshot/restore and dispose lifecycles.
+
+Fleet registrations are a special case: an instance restored via `ContextLens.fromSnapshot` has no fleet membership, but the parent fleet may be restored via `ContextLensFleet.fromSnapshot` (cl-spec-012 §8), which wraps `ContextLens.fromSnapshot` for every member instance and re-establishes both the registration and the lifecycle integration handshake atomically. From the per-instance spec's perspective, this is still a fresh `fromSnapshot` plus a fresh `fleet.register` — the wrapper does not change the instance-level contract.
+
+**Lifecycle state.** The restored instance is **live**: `isDisposed === false`, `isDisposing === false` (cl-spec-015 §2.5). The fact that the snapshot was captured on a different instance — possibly one that has since been disposed — does not propagate to the restored instance. Each `fromSnapshot()` produces a fresh instance with a fresh `instanceId` (the identifier carried by `stateDisposed` events and `DisposedError` messages); the disposed source's identifier is not carried over. Callers correlating sessions across snapshots must do so via their own labels, not via library-internal identifiers.
 
 ---
 
@@ -435,6 +459,10 @@ The reference implementation maintains a deserializer for each published format 
 
 **Invariant 8: Atomic restore.** `fromSnapshot` either returns a fully functional instance or throws an error. There is no partially-restored instance. If segment 247 of 500 fails to deserialize, the entire restore fails and no instance is returned.
 
+**Invariant 9: Snapshot governed by lifecycle gates.** `snapshot()` is read-only and is therefore permitted while `isDisposing === true` per the cl-spec-015 §3.4 read-only-during-disposal rule. Once `isDisposed === true`, `snapshot()` throws `DisposedError` like every other public method except the lifecycle exemptions. The state-preserving continuation pattern (section 3.4) requires capture before `dispose()` returns — there is no path to extract state from a disposed instance.
+
+**Invariant 10: Restored instance is live and independent.** Every instance produced by `fromSnapshot` is in the live state (`isDisposed === false`, `isDisposing === false`) regardless of the lifecycle status of the source instance at snapshot time or thereafter. The restored instance has its own `instanceId`, its own integration attachments (none, until the caller re-attaches), and its own dispose lifecycle. Restoring from a snapshot taken on a now-disposed instance does not re-create the disposed instance — it creates a fresh sibling with the same accumulated state.
+
 ---
 
 ## 9. References
@@ -447,10 +475,12 @@ The reference implementation maintains a deserializer for each published format 
 | `cl-spec-004` (Task Identity) | Defines task state, transition history — all serialized. |
 | `cl-spec-005` (Embedding Strategy) | Defines embedding cache and provider interface — cache not serialized, provider re-provided, metadata preserved for change detection. |
 | `cl-spec-006` (Tokenization Strategy) | Defines token cache and tokenizer interface — cache not serialized, provider re-provided, metadata preserved for change detection. |
-| `cl-spec-007` (API Surface) | Defines `snapshot()` and `fromSnapshot()` as API methods. Defines constructor config restored from snapshot. |
+| `cl-spec-007` (API Surface) | Defines `snapshot()` and `fromSnapshot()` as API methods. Defines constructor config restored from snapshot. The lifecycle methods (`dispose`, `isDisposed`, `isDisposing`) and `DisposedError` interact with this spec via the read-only-during-disposal rule (Invariant 9) and the snapshot-then-dispose continuation pattern (section 3.4). |
 | `cl-spec-010` (Report & Diagnostics) | Defines report history, pattern history, timeline, performance metrics, warnings — all serialized. |
 | `cl-spec-011` (Report Schema) | Defines schema versioning conventions followed by the snapshot format. Shared type definitions referenced by the snapshot structure. |
+| `cl-spec-012` (Fleet Monitor) | Section 8 (Fleet Serialization) wraps this spec's per-instance `snapshot()` / `fromSnapshot()` contract — a `SerializedFleet` embeds one `SerializedState` per registered instance verbatim. The fleet's `formatVersion` is independent of this spec's per-instance `formatVersion` (cl-spec-012 Invariant 12). |
+| `cl-spec-015` (Instance Lifecycle) | Defines `dispose()` and the terminal state. Section 3.4 of this spec specifies the snapshot-then-dispose-then-fromSnapshot continuation pattern as the only state-preserving path across disposal. cl-spec-015 §5.4 enumerates the same pattern from the lifecycle perspective. |
 
 ---
 
-*context-lens -- authored by Akil Abderrahim and Claude Opus 4.6*
+*context-lens -- authored by Akil Abderrahim, Claude Opus 4.6, and Claude Opus 4.7*

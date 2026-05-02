@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { EventEmitter } from '../../src/events.js';
+import { EventEmitter, type ContextLensEventMap, type StateDisposedEvent } from '../../src/events.js';
 
 interface TestEventMap {
   foo: { value: number };
@@ -162,5 +162,197 @@ describe('EventEmitter', () => {
       expect(fooHandler).toHaveBeenCalledOnce(); // still just once
       expect(barHandler).toHaveBeenCalledOnce();
     });
+  });
+
+  // ─── emitCollect (cl-spec-015 §4.3) ────────────────────────────
+
+  describe('emitCollect', () => {
+    it('dispatches handlers in registration order, errorLog stays empty when no throws', () => {
+      const emitter = new EventEmitter<TestEventMap>();
+      const order: number[] = [];
+
+      emitter.on('foo', () => order.push(1));
+      emitter.on('foo', () => order.push(2));
+      emitter.on('foo', () => order.push(3));
+
+      const errorLog: unknown[] = [];
+      emitter.emitCollect('foo', { value: 0 }, errorLog);
+
+      expect(order).toEqual([1, 2, 3]);
+      expect(errorLog).toEqual([]);
+    });
+
+    it('pushes thrown values onto errorLog in caught-order; iteration does not abort', () => {
+      const emitter = new EventEmitter<TestEventMap>();
+      const e1 = new Error('boom-1');
+      const e3 = new Error('boom-3');
+      let secondRan = false;
+      let fourthRan = false;
+
+      emitter.on('foo', () => { throw e1; });
+      emitter.on('foo', () => { secondRan = true; });
+      emitter.on('foo', () => { throw e3; });
+      emitter.on('foo', () => { fourthRan = true; });
+
+      const errorLog: unknown[] = [];
+      emitter.emitCollect('foo', { value: 1 }, errorLog);
+
+      expect(errorLog).toHaveLength(2);
+      expect(errorLog[0]).toBe(e1);
+      expect(errorLog[1]).toBe(e3);
+      expect(secondRan).toBe(true);
+      expect(fourthRan).toBe(true);
+    });
+
+    it('is a no-op when no handlers are registered', () => {
+      const emitter = new EventEmitter<TestEventMap>();
+      const errorLog: unknown[] = [];
+
+      expect(() => emitter.emitCollect('foo', { value: 1 }, errorLog)).not.toThrow();
+      expect(errorLog).toEqual([]);
+    });
+
+    it('appends to a non-empty errorLog without disturbing prior entries', () => {
+      const emitter = new EventEmitter<TestEventMap>();
+      emitter.on('foo', () => { throw new Error('new'); });
+
+      const errorLog: unknown[] = ['preexisting'];
+      emitter.emitCollect('foo', { value: 1 }, errorLog);
+
+      expect(errorLog).toHaveLength(2);
+      expect(errorLog[0]).toBe('preexisting');
+      expect(errorLog[1]).toBeInstanceOf(Error);
+      expect((errorLog[1] as Error).message).toBe('new');
+    });
+
+    it('does not affect the standard emit() swallow path', () => {
+      const emitter = new EventEmitter<TestEventMap>();
+      const after = vi.fn();
+
+      emitter.on('foo', () => { throw new Error('boom'); });
+      emitter.on('foo', after);
+
+      // Standard emit still swallows
+      expect(() => emitter.emit('foo', { value: 1 })).not.toThrow();
+      expect(after).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('removeAllListeners', () => {
+    it('detaches every handler from every event', () => {
+      const emitter = new EventEmitter<TestEventMap>();
+      const fooA = vi.fn();
+      const fooB = vi.fn();
+      const bar = vi.fn();
+
+      emitter.on('foo', fooA);
+      emitter.on('foo', fooB);
+      emitter.on('bar', bar);
+
+      emitter.removeAllListeners();
+
+      emitter.emit('foo', { value: 1 });
+      emitter.emit('bar', { msg: 'hi' });
+
+      expect(fooA).not.toHaveBeenCalled();
+      expect(fooB).not.toHaveBeenCalled();
+      expect(bar).not.toHaveBeenCalled();
+    });
+
+    it('is idempotent — repeated calls do not throw', () => {
+      const emitter = new EventEmitter<TestEventMap>();
+      emitter.on('foo', vi.fn());
+      expect(() => {
+        emitter.removeAllListeners();
+        emitter.removeAllListeners();
+        emitter.removeAllListeners();
+      }).not.toThrow();
+    });
+
+    it('the emitter remains functional for new subscriptions', () => {
+      const emitter = new EventEmitter<TestEventMap>();
+      emitter.on('foo', vi.fn());
+      emitter.removeAllListeners();
+
+      const after = vi.fn();
+      emitter.on('foo', after);
+      emitter.emit('foo', { value: 7 });
+
+      expect(after).toHaveBeenCalledOnce();
+      expect(after).toHaveBeenCalledWith({ value: 7 });
+    });
+  });
+});
+
+// ─── ContextLensEventMap / StateDisposedEvent (cl-spec-015 §7.1) ────
+
+describe('stateDisposed event wiring', () => {
+  it('event map accepts the documented stateDisposed payload shape', () => {
+    const emitter = new EventEmitter<ContextLensEventMap>();
+    const payload: StateDisposedEvent = {
+      type: 'stateDisposed',
+      instanceId: 'cl-1-abc123',
+      timestamp: 1234567890,
+    };
+
+    let received: StateDisposedEvent | null = null;
+    emitter.on('stateDisposed', (p) => { received = p; });
+    emitter.emit('stateDisposed', payload);
+
+    expect(received).toEqual(payload);
+  });
+
+  it('frozen payload rejects mutations at runtime', () => {
+    const payload = Object.freeze({
+      type: 'stateDisposed' as const,
+      instanceId: 'cl-1-abc123',
+      timestamp: 1234567890,
+    });
+
+    expect(() => {
+      (payload as { instanceId: string }).instanceId = 'mutated';
+    }).toThrow(TypeError);
+  });
+});
+
+// ─── ContextLensEventMap / cachesCleared (cl-spec-007 §8.9.1, Gap 6) ──
+
+describe('cachesCleared event wiring', () => {
+  it('event map accepts the documented cachesCleared payload shape', () => {
+    const emitter = new EventEmitter<ContextLensEventMap>();
+    let received: ContextLensEventMap['cachesCleared'] | null = null;
+    emitter.on('cachesCleared', (p) => { received = p; });
+
+    const payload = {
+      kind: 'all' as const,
+      entriesCleared: { tokenizer: 12, embedding: 34, similarity: 56 },
+    };
+    emitter.emit('cachesCleared', payload);
+
+    expect(received).toEqual(payload);
+  });
+
+  it('per-cache kinds also flow through the event map', () => {
+    const emitter = new EventEmitter<ContextLensEventMap>();
+    const received: ContextLensEventMap['cachesCleared'][] = [];
+    emitter.on('cachesCleared', (p) => { received.push(p); });
+
+    emitter.emit('cachesCleared', {
+      kind: 'tokenizer',
+      entriesCleared: { tokenizer: 7, embedding: 0, similarity: 0 },
+    });
+    emitter.emit('cachesCleared', {
+      kind: 'embedding',
+      entriesCleared: { tokenizer: 0, embedding: 8, similarity: 0 },
+    });
+    emitter.emit('cachesCleared', {
+      kind: 'similarity',
+      entriesCleared: { tokenizer: 0, embedding: 0, similarity: 9 },
+    });
+
+    expect(received).toHaveLength(3);
+    expect(received[0]!.kind).toBe('tokenizer');
+    expect(received[1]!.kind).toBe('embedding');
+    expect(received[2]!.kind).toBe('similarity');
   });
 });

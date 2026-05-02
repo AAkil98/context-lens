@@ -342,4 +342,21 @@ export class DiagnosticsManager {
   _getSequence(): number {
     return this.sequence;
   }
+
+  /**
+   * Reset all diagnostic state — report history, timeline, warnings, rolling
+   * trend, latest report, and sequence counter. Used by the teardown
+   * orchestrator (step 4). Event subscriptions registered in the constructor
+   * remain attached to the emitter; the emitter clears its own registry
+   * during step 5, so any subsequent emissions are no-ops.
+   * @see cl-spec-015 §4.1
+   */
+  clear(): void {
+    this.reportHistory.clear();
+    this.timeline.clear();
+    this.warnings.length = 0;
+    this.rollingTrend = null;
+    this.latestReport = null;
+    this.sequence = 0;
+  }
 }

@@ -4,8 +4,8 @@ title: Embedding Strategy
 type: design
 status: complete
 created: 2026-04-01
-revised: 2026-04-01
-authors: [Akil Abderrahim, Claude Opus 4.6]
+revised: 2026-05-01
+authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
 tags: [embedding, similarity, provider, adapter, fallback, trigram, caching]
 depends_on: [cl-spec-002]
 ---
@@ -118,7 +118,7 @@ embed(text: string) → number[]
 
 - **Deterministic for identical input.** The same text must produce the same vector from the same provider instance. This is load-bearing — embedding caching (section 5) depends on it. Most embedding models are deterministic by nature (no sampling), but providers that add noise, use approximate inference, or randomize for privacy must document this and accept that caching may serve stale-on-first-call results.
 - **Stateless.** `embed` must not depend on previously embedded texts, call ordering, or accumulated state. context-lens may call `embed` in any order, skip calls for cached content, or repeat calls on cache miss. The result must depend only on the input text and the model.
-- **Thread-safe.** context-lens may call `embed` from multiple execution contexts if the runtime supports it. The provider must not corrupt internal state on concurrent calls. Providers that are inherently single-threaded (e.g., a local ONNX model on one GPU) should serialize internally rather than relying on context-lens to serialize externally.
+- **Thread-safe across instances.** context-lens guarantees per-instance sequential invocation (cl-spec-007 §12) — within a single context-lens instance the provider sees at most one in-flight call. A provider object may, however, be shared across multiple context-lens instances; in that case it may receive concurrent calls from instances running in different execution contexts, and must not corrupt internal state under that pattern. Providers that are inherently single-threaded (e.g., a local ONNX model on one GPU) should serialize internally rather than relying on context-lens to serialize externally.
 
 Unlike the tokenizer interface (cl-spec-006 section 2.1), `embed` is **not required to be synchronous**. Embedding frequently involves network calls to remote APIs (OpenAI, Cohere, Voyage) or GPU inference for local models — both have inherent latency that cannot be hidden behind a synchronous interface without blocking. The contract is: `embed` returns a Promise that resolves to the vector. context-lens awaits the result before proceeding. From the caller's perspective, lifecycle operations that trigger embedding (addSegment, setTask) are still effectively synchronous — they do not return until the embedding is complete. The async boundary is internal to the provider call, not exposed to the caller.
 
@@ -333,6 +333,8 @@ Setting the provider to null switches from embedding mode to trigram mode. All c
 
 **Registration is idempotent for the same provider.** If the caller calls `setEmbeddingProvider` with a provider whose `metadata.name` matches the current provider's name, context-lens treats it as a no-op — no cache invalidation, no recomputation. This allows callers to set the provider defensively (e.g., on every initialization path) without penalty. The check is on `metadata.name`, not object identity — two distinct provider objects with the same name are considered the same provider.
 
+**Provider lifecycle is caller-managed.** The embedding provider object is supplied by the caller and its lifetime is the caller's responsibility. context-lens holds a reference to the provider for the duration of the session, calls its `embed` and `embedBatch` methods, and reads its metadata — but it does not create, configure, shut down, or otherwise manage the provider. When a `ContextLens` instance is disposed (cl-spec-015), the library drops its reference to the provider in step 4 of teardown, but it does not invoke any shutdown hook the provider may expose. Providers with their own asynchronous lifecycle (network connection pools, worker threads, subprocess handles) are shut down by the caller after `dispose()` returns; cl-spec-015 §6.5 specifies the recommended pattern (`dispose()` first, then `await provider.close?.()`). This boundary is intentional and load-bearing — `dispose()` is synchronous (cl-spec-015 §3.5), and embedding it within an async provider-shutdown sequence would force every public method to reason about an "is this instance still being torn down?" race.
+
 ---
 
 ## 4. Embedding Lifecycle
@@ -466,6 +468,16 @@ The embedding cache has a simple invalidation model because embeddings are deter
 **No time-based expiration.** Embedding models are deterministic — the same text produces the same vector on every call. There is no reason for a cached embedding to become stale during a session. The model itself might be updated by the provider (OpenAI silently upgrading `text-embedding-3-small`), but within a session, the provider instance is fixed. Cross-session model updates are not a concern because the cache is session-scoped (it lives in memory, not on disk).
 
 **`clearTask` removes the task entry.** When `clearTask` is called (cl-spec-004 section 4.2), the task description's embedding is no longer needed. The cache entry is not actively removed (it is benign and LRU will reclaim it), but the reference from task state to the cached embedding is dropped.
+
+### 5.5 Manual Release
+
+The embedding cache supports caller-initiated manual release via the API surface defined in cl-spec-007 §8.9. Three operations apply:
+
+- **`clearCaches('embedding')` or `clearCaches('all')`** — drops every cached vector / trigram set. Active segments retain their content; the next `assess()` re-prepares (re-embeds, or re-computes trigrams for) any active segment that needs a similarity computation. Each cache miss against a configured provider is a fresh `embed` call, so the cost of the first post-clear assessment is dominated by provider latency rather than context-lens computation. Trigram mode incurs only local CPU cost.
+- **`setCacheSize('embedding', size)`** — resizes the cache at runtime. Shrinking evicts least-recently-used entries until the bound is satisfied; growing leaves existing entries unchanged. `size = 0` is permitted and disables the cache (every embedding lookup becomes a miss); the use case is short-lived, memory-constrained sessions where re-embedding on every assess is acceptable. cl-spec-007 §8.9.2 documents the per-cache guidance.
+- **`getMemoryUsage()`** — reports the current `entries`, `maxEntries`, and `estimatedBytes` for the embedding cache. The `estimatedBytes` figure uses the formula in cl-spec-009 §6.5 (mode-aware: dimensions for embeddings, average trigram-set size for trigram mode).
+
+Manual release does not affect the embedding provider itself, the active mode (embedding vs. trigram), or any segment's content. The cache is a memoization layer between the provider and similarity computation; clearing it forfeits memoization but preserves all other state. The provider lifecycle remains caller-managed (Invariant 11) — `clearCaches` does not invoke any provider shutdown hook.
 
 ---
 
@@ -624,6 +636,8 @@ These invariants are guarantees that the implementation must uphold and that con
 
 **10. Deterministic truncation.** When the provider declares `maxInputTokens` and content exceeds it, context-lens truncates the content before embedding. The truncation is deterministic — same content, same tokenizer, same limit → same truncated text. The cached embedding is keyed on the full content's hash (section 2.3), so truncation is transparent to the cache layer. The full content is retained in the segment; only the text passed to `embed` is truncated.
 
+**11. Caller-owned provider lifecycle.** The embedding provider's lifetime is fully owned by the caller. context-lens does not invoke any provider lifecycle hook — no construction, no warmup, no shutdown — at any point in the session, including during `dispose()` (cl-spec-015). When the instance is disposed, the library drops its reference to the provider; the provider's own teardown (network pool drain, worker thread termination, etc.) is the caller's responsibility, performed after `dispose()` returns. (Section 3.4; cl-spec-015 §6.5.)
+
 ---
 
 ## 9. References
@@ -636,7 +650,9 @@ These invariants are guarantees that the implementation must uphold and that con
 | `cl-spec-003` (Degradation Patterns) | Pattern thresholds operate on similarity scores produced by the embedding or trigram path |
 | `cl-spec-004` (Task Identity) | Task description embedding (section 6.1), trigram fallback (section 6.2), preparation caching (section 6.3) |
 | `cl-spec-006` (Tokenization Strategy) | Parallel provider abstraction pattern — one required method, optional batch, metadata. Cache structure (LRU, content-hash keyed). Provider switch triggers full recount/recomputation |
+| `cl-spec-007` (API Surface) | §12 defines the strict-sequential per-instance invocation contract that scopes provider call ordering. The §2.1 "Thread-safe across instances" bullet anchors the multi-instance shared-provider case to that contract. |
+| `cl-spec-015` (Instance Lifecycle) | Defines `dispose()` and the boundary between library-managed and caller-managed resources. The embedding provider falls on the caller-managed side: §3.4 of this spec and §6.5 of cl-spec-015 jointly specify that `dispose()` does not invoke provider shutdown hooks and the caller must shut down providers after `dispose()` returns. Invariant 11 is the canonical statement of this boundary. |
 
 ---
 
-*context-lens -- authored by Akil Abderrahim and Claude Opus 4.6*
+*context-lens -- authored by Akil Abderrahim, Claude Opus 4.6, and Claude Opus 4.7*

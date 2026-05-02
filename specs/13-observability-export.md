@@ -2,12 +2,12 @@
 id: cl-spec-013
 title: Observability Export
 type: design
-status: draft
+status: complete
 created: 2026-04-04
-revised: 2026-04-04
-authors: [Akil Abderrahim, Claude Opus 4.6]
-tags: [observability, opentelemetry, otel, metrics, gauges, counters, tracing, export]
-depends_on: [cl-spec-007, cl-spec-010]
+revised: 2026-05-01
+authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
+tags: [observability, opentelemetry, otel, metrics, gauges, counters, tracing, export, lifecycle, reattach]
+depends_on: [cl-spec-007, cl-spec-010, cl-spec-014, cl-spec-015]
 ---
 
 # Observability Export
@@ -77,13 +77,85 @@ Construction is synchronous. The exporter begins monitoring immediately.
 
 ### 2.1 Lifecycle
 
+The exporter's lifecycle has two terminal paths: an explicit caller-initiated `disconnect()` and an auto-disconnect driven by the monitored instance's own `dispose()`. Both paths converge on the same end state — exporter no longer subscribed to instance events, no longer holding back-references — but they differ in event semantics.
+
+The exporter is a **lifecycle-aware integration** of the monitored instance per cl-spec-015 §6. Construction (section 2) registers a teardown callback with the instance; the callback fires during step 3 of the instance's `dispose()` teardown sequence (cl-spec-015 §4.1). The exporter holds a back-reference to the instance and registers `on()` handlers for quality-related events; both directions of the link are torn down by either lifecycle path.
+
+#### 2.1.1 Explicit disconnect
+
 ```
 exporter.disconnect() → void
 ```
 
-Unsubscribes from the instance's events and stops metric updates. The OTel instruments remain registered (OTel does not support instrument deregistration), but they stop receiving new values. Subsequent `assess()` calls on the instance do not produce metric updates.
+Unsubscribes from the instance's events, detaches the lifecycle teardown callback, and stops metric updates. The OTel instruments remain registered (OTel does not support instrument deregistration), but they stop receiving new values. Subsequent `assess()` calls on the instance do not produce metric updates.
 
-`disconnect()` is idempotent — calling it multiple times has no additional effect.
+`disconnect()` is idempotent — calling it multiple times has no additional effect. Calling it after auto-disconnect (section 2.1.2) is also a no-op.
+
+`disconnect()` is silent on the OTel event channel — it does not emit a `context_lens.instance.disposed` event (section 4.1). The instance remains live; only the exporter's connection to it is severed.
+
+After `disconnect()` the exporter is in the **detached state**, from which it may be re-attached to a fresh instance via `attach()` (section 2.1.3). The detached state is symmetric with the auto-disconnect end state — both leave the exporter with no live subscriptions, no back-reference, and the same set of preserved OTel instruments.
+
+#### 2.1.2 Auto-disconnect on instance disposal
+
+When the monitored instance's `dispose()` runs, the exporter's teardown callback is invoked synchronously during step 3 of the instance's teardown sequence (cl-spec-015 §4.1, §6.2, §6.4). Inside the callback the exporter observes:
+
+- `instance.isDisposed === false`, `instance.isDisposing === true`
+- All read-only public methods on the instance behave per their live specification — caches, ledger, and ring buffers are intact; the registry has not yet been detached
+- Mutating methods throw `DisposedError` per the read-only-during-disposal rule
+
+The callback executes the following steps in order:
+
+1. **Flush any buffered signals derived from the instance.** Exporters that batch signals — for example, a metrics exporter that aggregates per-dimension samples and emits a histogram every interval — emit the final signal covering the just-disposed instance. After step 4 of the instance's teardown clears the accumulated state, the data needed to compute these signals is gone.
+2. **Emit the `context_lens.instance.disposed` log event** (section 4.1), if `emitEvents` is `true` and a `logProvider` is configured.
+3. **Detach handlers registered with the instance through `on()`.** The library detaches the registry in step 5 of teardown (cl-spec-015 §4.1), so this is not strictly required for memory release, but explicit detachment is the cleaner contract — it is self-contained on the exporter side and survives any future refactor that delays step 5.
+4. **Release the back-reference to the instance.** The exporter's retained pointer is nulled so the instance's owned resources can be collected after step 4 of teardown completes.
+
+After auto-disconnect the exporter's external state is identical to post-`disconnect()` state. Subsequent calls to `exporter.disconnect()` are no-ops.
+
+The exporter does not call `instance.dispose()` from inside its own teardown callback. Reentrance is permitted by the lifecycle (returns immediately as a no-op via the `isDisposing` check), but the exporter has no operational reason to re-enter — it has already received the notification.
+
+The `stateDisposed` event (cl-spec-007 §10.2, cl-spec-015 §7.1) is delivered to subscribed handlers during step 2 of teardown, *before* the exporter's teardown callback runs in step 3. An exporter that subscribes to `stateDisposed` therefore sees the disposal twice: once as an event in step 2, once as a teardown callback in step 3. Implementations must not duplicate the final-signal flush across both paths. The recommended pattern is to perform the flush in the step-3 callback and to let any step-2 `stateDisposed` handler perform only ambient work — log/trace the disposal as context, emit a metric counter, etc. The step-2 path is constrained by the read-only-during-disposal rule (cl-spec-015 §3.4) but can call read-only methods; centralizing the flush in step 3 is a guidance choice, not a hard restriction.
+
+#### 2.1.3 Re-attach after detach
+
+```
+exporter.attach(instance: ContextLens) → void
+```
+
+A detached exporter — one that has reached the end state of either `disconnect()` (section 2.1.1) or auto-disconnect (section 2.1.2) — may be re-attached to a fresh `ContextLens` instance. This is the natural complement to the snapshot-then-dispose-then-`fromSnapshot()` continuation pattern (cl-spec-014 §3.4): the caller takes a snapshot, disposes the original instance (which auto-disconnects the exporter and emits the `context_lens.instance.disposed` log event), restores the snapshot to a new instance, and re-attaches the exporter to the new instance to continue the metric stream without rebuilding observability infrastructure.
+
+**Preconditions:**
+
+- The exporter must be in the detached state. Calling `attach()` on a still-connected exporter throws — the contract is single-instance binding (Invariant 11), so the caller must `disconnect()` (or wait for auto-disconnect) before re-attaching to a different instance.
+- `instance` must be a live `ContextLens` instance. Already-disposed instances are rejected with `DisposedError` raised by the public method `attach` calls during the lifecycle integration handshake — same surface as construction-time rejection per Invariant 8.
+
+**State-scope contract.** `attach()` re-establishes the connection while reusing the OTel instruments registered at construction. The instruments are not re-registered with the meter provider; the same `OTelObservableGauge`, `OTelCounter`, and `OTelHistogram` objects survive across detach/attach cycles. This is load-bearing: it preserves counter monotonicity and histogram distributional continuity for downstream consumers (Invariant 10).
+
+The per-instrument behavior on re-attach is:
+
+| Instrument family | Behavior on `attach()` | Rationale |
+|-------------------|------------------------|-----------|
+| Counters (`evictions_total`, `compactions_total`, `restorations_total`, `pattern_activations_total`, `assess_count`, `task_changes_total`) | **Preserved.** No reset. Subsequent `add()` calls accumulate against pre-detach values. | Counters are monotonic by OTel contract. Resetting them would violate that contract and break rate-derivation queries on the consumer dashboard (e.g., `rate(context_lens_evictions_total[5m])`). |
+| Histogram (`assess_duration_ms`) | **Preserved.** Pre-detach observations remain in the distribution; subsequent `record()` calls add to the same instrument. | Histograms are distributional. Pre-detach observations capture genuine signal that should not be discarded. |
+| Gauges (`coherence`, `density`, `relevance`, `continuity`, `composite`, `utilization`, `segment_count`, `headroom`, `pattern_count`) | **Reset.** Stored values revert to defaults; the quality-gauge "has value" guard re-arms. The first `reportGenerated` event from the newly-attached instance repopulates them. | Gauges are point-in-time observations. Pre-detach values describe the prior instance's state, not the newly-attached one. Carrying them across attach would misreport the new instance until its first assessment. |
+
+**Re-subscription.** `attach()` re-subscribes to the new instance's events (the same set as construction-time subscription per section 2) and re-registers the lifecycle teardown callback (cl-spec-015 §6.1). After `attach()` returns, the exporter behaves identically to a freshly-constructed exporter targeting the new instance, except for the preserved counter and histogram state.
+
+**Idempotency boundary.** `attach()` is **not** idempotent. Calling it on an already-attached exporter throws — the caller must `disconnect()` first. This contrasts with `disconnect()`, which is idempotent. The asymmetry is structural: `attach()` must commit a fresh subscription (a non-idempotent operation that changes which instance the exporter observes), whereas `disconnect()` is a destructor-style cleanup of whatever happens to be live.
+
+**Single-instance binding.** An exporter is bound to at most one `ContextLens` instance at a time (Invariant 11). The `disconnect()`-then-`attach()` cycle is the only supported way to retarget an exporter; multi-instance fan-in — one exporter aggregating signals from multiple live instances simultaneously — is unsupported. Callers needing per-instance fan-in to a shared metric backend should construct one exporter per instance (section 5.2) and rely on the `context_lens.window` attribute for downstream aggregation.
+
+**Snapshot-then-dispose continuation pattern.** The canonical use case (cl-spec-014 §3.4):
+
+```
+const snapshot = oldLens.snapshot()
+oldLens.dispose()                         // exporter auto-disconnects; log event emitted
+const newLens = ContextLens.fromSnapshot(snapshot, config)
+exporter.attach(newLens)                  // re-bind; gauges reset; counters preserved
+// ... continue using newLens ...
+```
+
+The metric stream resumes against `newLens` without interruption from the consumer's perspective. Counter rates and histogram distributions remain valid across the transition; gauge values reflect `newLens` from its first `assess()` onward. Dashboards built on `context_lens.window` need no re-configuration — the attribute is unchanged because the exporter's `label` did not change.
 
 ---
 
@@ -157,6 +229,7 @@ When `emitEvents` is `true` and a `logProvider` is configured, the adapter emits
 | `context_lens.task.changed` | INFO | Task transition (not same-task no-ops) | `task.transition_type`, `task.similarity` |
 | `context_lens.capacity.warning` | WARN | Utilization exceeds 0.90 | `capacity.utilization`, `capacity.headroom` |
 | `context_lens.budget.violated` | WARN | Operation exceeds performance budget | `budget.operation`, `budget.self_time_ms`, `budget.target_ms` |
+| `context_lens.instance.disposed` | INFO | The monitored instance's `dispose()` runs and the exporter's teardown callback fires (section 2.1.2) | `instance.id` (matches `stateDisposed.instanceId` from cl-spec-015 §7.1), `instance.final_composite` (composite quality of the final flush, or `null`), `instance.final_utilization` (capacity utilization at flush, or `null`) |
 
 All events carry the common attributes (section 3.4) plus `context_lens.timestamp` (epoch ms of the triggering event).
 
@@ -236,7 +309,17 @@ No custom data pipeline is needed. The adapter produces standard OTel metrics th
 
 **Invariant 5: Event handler safety.** The adapter's event handlers follow the same contract as any context-lens event handler (cl-spec-007 §9.3): they do not call mutating methods on the instance, they are fast (OTel metric recording is O(1)), and handler errors are caught internally — a failing OTel push does not propagate to the context-lens operation that triggered it.
 
-**Invariant 6: No internal coupling.** The adapter depends only on the public API of `ContextLens` (cl-spec-007) and the public diagnostic structures (cl-spec-010). It does not access internal scoring state, similarity matrices, or cache internals. A conforming `ContextLens` implementation works with the adapter without modification.
+**Invariant 6: No internal coupling.** The adapter depends only on the public API of `ContextLens` (cl-spec-007) and the public diagnostic structures (cl-spec-010). It does not access internal scoring state, similarity matrices, or cache internals. A conforming `ContextLens` implementation works with the adapter without modification. The lifecycle-aware integration registration (section 2.1) is part of the public API per cl-spec-015 §6.
+
+**Invariant 7: Auto-disconnect on instance disposal.** When the monitored instance's `dispose()` runs, the exporter's teardown callback fires during step 3 of the instance's teardown sequence (cl-spec-015 §4.1) and the exporter transitions to its disconnected end state — no longer subscribed to instance events, no longer holding a back-reference. The teardown callback flushes any buffered final signal, emits the `context_lens.instance.disposed` log event (when configured), and detaches `on()` handlers. After auto-disconnect, subsequent `exporter.disconnect()` calls are no-ops (Invariant 3 idempotency extended to cover the convergent end state).
+
+**Invariant 8: Disposed-instance rejection at construction.** Constructing a `ContextLensExporter` with an already-disposed instance throws `DisposedError` (raised by the public method the exporter calls during attachment). The exporter does not silently accept a disposed instance and never produces metrics for one.
+
+**Invariant 9: At-most-once final flush.** The exporter performs at most one final-signal flush per monitored instance, in the step-3 teardown callback (section 2.1.2). A `stateDisposed` event handler that the exporter may register additionally must not duplicate the flush — the recommended pattern is to confine flush work to the step-3 callback and use the step-2 handler only for ambient metric updates (cl-spec-015 §6.4).
+
+**Invariant 10: State scope on re-attach.** When `attach(instance)` is called on a detached exporter, counters and histograms are preserved (no reset; OTel monotonic and distributional contracts unbroken across detach/attach cycles), and gauge stored values are reset to defaults so the first `reportGenerated` event from the newly-attached instance repopulates them. Pre-detach gauge values are not carried into the new attachment. The OTel instruments themselves (`OTelObservableGauge`, `OTelCounter`, `OTelHistogram`) are reused, not re-created — ensuring downstream consumers see one continuous metric series across the cycle (section 2.1.3).
+
+**Invariant 11: Single-instance binding.** An exporter is bound to at most one `ContextLens` instance at a time. `attach(instance)` on a still-connected exporter throws — the caller must `disconnect()` (or wait for auto-disconnect) before re-attaching to a different instance. Multi-instance fan-in (one exporter aggregating signals from multiple live instances simultaneously) is unsupported; callers needing per-instance fan-in to a shared backend construct one exporter per instance (section 5.2) and aggregate downstream via the `context_lens.window` attribute (section 2.1.3).
 
 ---
 
@@ -244,12 +327,14 @@ No custom data pipeline is needed. The adapter produces standard OTel metrics th
 
 | Reference | Description |
 |-----------|-------------|
-| `cl-spec-007` (API Surface) | Defines the event system the adapter subscribes to and the public methods it reads. |
+| `cl-spec-007` (API Surface) | Defines the event system the adapter subscribes to and the public methods it reads, including the lifecycle methods (`dispose`, `isDisposed`, `isDisposing`) and the `DisposedError` raised on disposed-instance method calls. |
 | `cl-spec-009` (Performance Budget) | Defines the timing infrastructure whose selfTime is recorded as the `assess_duration_ms` histogram. |
 | `cl-spec-010` (Report & Diagnostics) | Defines the diagnostic structures the adapter reads for metric values. |
 | `cl-spec-012` (Fleet Monitor) | Defines the fleet-level aggregation that complements per-instance OTel export. |
+| `cl-spec-014` (Serialization) | Defines `snapshot()` and `fromSnapshot()`. §3.4 (snapshot-then-dispose-then-`fromSnapshot()` continuation pattern) is the canonical motivating use case for the `attach()` method specified in section 2.1.3 of this spec. |
+| `cl-spec-015` (Instance Lifecycle) | Defines the lifecycle-aware integration model that this spec implements. Section 2.1.2 (Auto-disconnect on instance disposal) specifies the per-exporter teardown callback contract executed during step 3 of an instance's `dispose()` teardown sequence. cl-spec-015 §6.4 enumerates the same exporter-side behavior from the lifecycle perspective. Section 2.1.3 (Re-attach after detach) reuses the same handshake when binding to a freshly-restored instance. |
 | OpenTelemetry Specification | The external standard that defines metrics (gauges, counters, histograms), attributes, log events, and the MeterProvider/LoggerProvider interfaces. |
 
 ---
 
-*context-lens -- authored by Akil Abderrahim and Claude Opus 4.6*
+*context-lens -- authored by Akil Abderrahim, Claude Opus 4.6, and Claude Opus 4.7*
