@@ -2,10 +2,10 @@
 id: cl-spec-002
 title: Quality Model
 type: design
-status: complete
+status: complete (amended)
 created: 2026-03-26
-revised: 2026-03-26
-authors: [Akil Abderrahim, Claude Opus 4.6]
+revised: 2026-05-02
+authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
 tags: [quality, coherence, density, relevance, continuity, scoring, baseline]
 depends_on: [cl-spec-001]
 ---
@@ -286,7 +286,7 @@ topicalConcentration = 1.0 / k
 
 A single cluster (k=1) produces concentration 1.0 — the window is fully focused. Ten clusters (k=10) produce concentration 0.1 — the window is scattered. This is a deliberately simple formula. Sophisticated clustering metrics (silhouette score, entropy) would add complexity without proportional benefit — context-lens needs a directional signal, not a publication-grade clustering analysis.
 
-**Performance note:** The full similarity matrix is O(n²) in the number of segments. For large windows (> 200 segments), context-lens samples: it computes similarity for a random subset of pairs and extrapolates cluster count. The sampling threshold and strategy are defined in the performance budget (cl-spec-009). For typical windows (10–100 segments), the full matrix is computed — it is fast enough at these scales.
+**Performance note:** The full similarity matrix is O(n²) in the number of segments. For large windows (> 200 segments), context-lens samples: it computes similarity for a random subset of pairs and extrapolates cluster count. The sampling threshold and strategy are defined in the performance budget (cl-spec-009). For typical windows (10–100 segments), the full matrix is computed — it is fast enough at these scales. The sampling adaptation at n > 300 (tighter cap on density's per-segment comparison count) and the incremental similarity cache that survives mutation cycles are coordinated by `cl-spec-016` (Similarity Caching & Sampling) — added in v0.2.0 to bring `assess@500` cache-warm under the 50 ms budget.
 
 ### 3.5 Group Coherence
 

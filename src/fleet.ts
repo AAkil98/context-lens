@@ -6,7 +6,8 @@
  * @see cl-spec-012
  */
 
-import type { ContextLens } from './index.js';
+import { ContextLens } from './index.js';
+import type { RestoreConfig } from './index.js';
 import type {
   Severity,
   ActivePattern,
@@ -18,14 +19,34 @@ import type {
   FleetCapacity,
   FleetReport,
   IntegrationHandle,
+  SerializedFleet,
+  SerializedFleetInstance,
+  FleetSnapshotOptions,
 } from './types.js';
-import { ValidationError, DuplicateIdError } from './errors.js';
+import { ValidationError, DuplicateIdError, ConfigurationError } from './errors.js';
 import { EventEmitter } from './events.js';
 
 // ─── Constants ───────────────────────────────────────────────────
 
 const SCHEMA_VERSION = '1.0.0';
 const DEFAULT_DEGRADATION_THRESHOLD = 0.5;
+const FLEET_FORMAT_VERSION: SerializedFleet['formatVersion'] = 'context-lens-fleet-snapshot-v1';
+
+// ─── FleetRestoreConfig ──────────────────────────────────────────
+
+/**
+ * Configuration for `ContextLensFleet.fromSnapshot`. Provides a default
+ * RestoreConfig (cl-spec-014 §5.1) applied to every instance, plus optional
+ * per-label overrides for heterogeneous fleet deployments.
+ *
+ * @see cl-spec-012 §8.2
+ */
+export interface FleetRestoreConfig {
+  /** Required default RestoreConfig — applied when no perLabel entry matches. */
+  default: RestoreConfig;
+  /** Optional per-label overrides. Labels not present in the snapshot are ignored. */
+  perLabel?: Record<string, RestoreConfig>;
+}
 
 // ─── Fleet Event Map ─────────────────────────────────────────────
 
@@ -256,6 +277,125 @@ export class ContextLensFleet {
     }
     const cached = options?.cached ?? false;
     return this.assessOneInstance(state, label, cached, Date.now());
+  }
+
+  // ── Serialization (cl-spec-012 §8) ───────────────────────────
+
+  /**
+   * Capture a self-contained snapshot of fleet state. Embeds one
+   * ContextLens.snapshot per registered instance verbatim and preserves the
+   * fleet's per-instance pattern-state cache for event-diffing continuity
+   * across restore (cl-spec-012 §8.1.1).
+   *
+   * @param options.includeContent - propagates to every instance snapshot per
+   *   cl-spec-014 §6. Default true (full snapshots, restorable).
+   * @returns A SerializedFleet wrapper.
+   * @throws DisposedError - surfaced verbatim if any registered instance has
+   *   been disposed without prior unregister.
+   * @see cl-spec-012 §8.1
+   */
+  snapshot(options?: FleetSnapshotOptions): SerializedFleet {
+    const includeContent = options?.includeContent ?? true;
+    const now = Date.now();
+
+    const instances: SerializedFleetInstance[] = [];
+    for (const label of this.labels) {
+      const state = this.instances.get(label)!;
+      // instance.snapshot throws DisposedError if the instance is disposed —
+      // surface verbatim per Invariant 11 (atomicity).
+      const instanceSnapshot = state.instance.snapshot({ includeContent });
+      instances.push({
+        label,
+        snapshot: instanceSnapshot,
+        trackingState: {
+          activePatterns: [...state.activePatterns],
+          patternActivatedAt: Object.fromEntries(state.patternActivatedAt),
+          lastAssessedAt: state.lastAssessedAt,
+        },
+      });
+    }
+
+    return {
+      formatVersion: FLEET_FORMAT_VERSION,
+      timestamp: now,
+      fleetOptions: { degradationThreshold: this.degradationThreshold },
+      instances,
+      fleetState: { fleetDegradedState: this.fleetDegradedState },
+    };
+  }
+
+  /**
+   * Reconstruct a fully-functional fleet from a SerializedFleet. Wraps
+   * ContextLens.fromSnapshot for each member and re-establishes registration
+   * plus the lifecycle integration handshake atomically.
+   *
+   * @param state The SerializedFleet produced by a previous snapshot() call.
+   * @param config FleetRestoreConfig with default + optional perLabel overrides.
+   * @returns A live ContextLensFleet with all instances registered, tracking
+   *   state rehydrated, and fleet-level diff flag restored.
+   * @throws ConfigurationError - unrecognized formatVersion or inner
+   *   ContextLens.fromSnapshot failure (decorated with offending label).
+   * @throws ValidationError - missing default config or duplicate label in
+   *   instances array.
+   * @see cl-spec-012 §8.2
+   */
+  static fromSnapshot(state: SerializedFleet, config: FleetRestoreConfig): ContextLensFleet {
+    // Step 1: validate format version.
+    if (state.formatVersion !== FLEET_FORMAT_VERSION) {
+      throw new ConfigurationError(
+        `Unsupported fleet snapshot format: ${state.formatVersion}. Expected: ${FLEET_FORMAT_VERSION}`,
+        { formatVersion: state.formatVersion },
+      );
+    }
+
+    // Step 2: validate config.
+    if (config == null || config.default == null) {
+      throw new ValidationError('FleetRestoreConfig.default is required', {});
+    }
+
+    // Step 3: defensive label-uniqueness check on the snapshot itself.
+    const seen = new Set<string>();
+    for (const entry of state.instances) {
+      if (seen.has(entry.label)) {
+        throw new ValidationError(`Duplicate label in fleet snapshot: ${entry.label}`, {
+          label: entry.label,
+        });
+      }
+      seen.add(entry.label);
+    }
+
+    // Step 4: construct fresh fleet with the captured options.
+    const fleet = new ContextLensFleet(state.fleetOptions);
+
+    // Step 5: restore each instance, register, rehydrate tracking state.
+    for (const entry of state.instances) {
+      const restoreConfig = config.perLabel?.[entry.label] ?? config.default;
+      let restored: ContextLens;
+      try {
+        restored = ContextLens.fromSnapshot(entry.snapshot, restoreConfig);
+      } catch (err) {
+        // Decorate with offending label, preserve the original cause.
+        const message = err instanceof Error ? err.message : String(err);
+        throw new ConfigurationError(
+          `Fleet restore failed at instance "${entry.label}": ${message}`,
+          { label: entry.label, cause: err },
+        );
+      }
+
+      // register() reattaches the lifecycle integration handshake.
+      fleet.register(restored, entry.label);
+
+      // Rehydrate per-instance tracking state.
+      const tracked = fleet.instances.get(entry.label)!;
+      tracked.activePatterns = new Set(entry.trackingState.activePatterns);
+      tracked.patternActivatedAt = new Map(Object.entries(entry.trackingState.patternActivatedAt));
+      tracked.lastAssessedAt = entry.trackingState.lastAssessedAt;
+    }
+
+    // Step 6: restore fleet-level diff flag.
+    fleet.fleetDegradedState = state.fleetState.fleetDegradedState;
+
+    return fleet;
   }
 
   // ── Private: per-instance assessment ─────────────────────────

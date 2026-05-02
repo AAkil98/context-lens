@@ -4,7 +4,7 @@ title: Embedding Strategy
 type: design
 status: complete
 created: 2026-04-01
-revised: 2026-04-29
+revised: 2026-05-01
 authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
 tags: [embedding, similarity, provider, adapter, fallback, trigram, caching]
 depends_on: [cl-spec-002]
@@ -118,7 +118,7 @@ embed(text: string) → number[]
 
 - **Deterministic for identical input.** The same text must produce the same vector from the same provider instance. This is load-bearing — embedding caching (section 5) depends on it. Most embedding models are deterministic by nature (no sampling), but providers that add noise, use approximate inference, or randomize for privacy must document this and accept that caching may serve stale-on-first-call results.
 - **Stateless.** `embed` must not depend on previously embedded texts, call ordering, or accumulated state. context-lens may call `embed` in any order, skip calls for cached content, or repeat calls on cache miss. The result must depend only on the input text and the model.
-- **Thread-safe.** context-lens may call `embed` from multiple execution contexts if the runtime supports it. The provider must not corrupt internal state on concurrent calls. Providers that are inherently single-threaded (e.g., a local ONNX model on one GPU) should serialize internally rather than relying on context-lens to serialize externally.
+- **Thread-safe across instances.** context-lens guarantees per-instance sequential invocation (cl-spec-007 §12) — within a single context-lens instance the provider sees at most one in-flight call. A provider object may, however, be shared across multiple context-lens instances; in that case it may receive concurrent calls from instances running in different execution contexts, and must not corrupt internal state under that pattern. Providers that are inherently single-threaded (e.g., a local ONNX model on one GPU) should serialize internally rather than relying on context-lens to serialize externally.
 
 Unlike the tokenizer interface (cl-spec-006 section 2.1), `embed` is **not required to be synchronous**. Embedding frequently involves network calls to remote APIs (OpenAI, Cohere, Voyage) or GPU inference for local models — both have inherent latency that cannot be hidden behind a synchronous interface without blocking. The contract is: `embed` returns a Promise that resolves to the vector. context-lens awaits the result before proceeding. From the caller's perspective, lifecycle operations that trigger embedding (addSegment, setTask) are still effectively synchronous — they do not return until the embedding is complete. The async boundary is internal to the provider call, not exposed to the caller.
 
@@ -469,6 +469,16 @@ The embedding cache has a simple invalidation model because embeddings are deter
 
 **`clearTask` removes the task entry.** When `clearTask` is called (cl-spec-004 section 4.2), the task description's embedding is no longer needed. The cache entry is not actively removed (it is benign and LRU will reclaim it), but the reference from task state to the cached embedding is dropped.
 
+### 5.5 Manual Release
+
+The embedding cache supports caller-initiated manual release via the API surface defined in cl-spec-007 §8.9. Three operations apply:
+
+- **`clearCaches('embedding')` or `clearCaches('all')`** — drops every cached vector / trigram set. Active segments retain their content; the next `assess()` re-prepares (re-embeds, or re-computes trigrams for) any active segment that needs a similarity computation. Each cache miss against a configured provider is a fresh `embed` call, so the cost of the first post-clear assessment is dominated by provider latency rather than context-lens computation. Trigram mode incurs only local CPU cost.
+- **`setCacheSize('embedding', size)`** — resizes the cache at runtime. Shrinking evicts least-recently-used entries until the bound is satisfied; growing leaves existing entries unchanged. `size = 0` is permitted and disables the cache (every embedding lookup becomes a miss); the use case is short-lived, memory-constrained sessions where re-embedding on every assess is acceptable. cl-spec-007 §8.9.2 documents the per-cache guidance.
+- **`getMemoryUsage()`** — reports the current `entries`, `maxEntries`, and `estimatedBytes` for the embedding cache. The `estimatedBytes` figure uses the formula in cl-spec-009 §6.5 (mode-aware: dimensions for embeddings, average trigram-set size for trigram mode).
+
+Manual release does not affect the embedding provider itself, the active mode (embedding vs. trigram), or any segment's content. The cache is a memoization layer between the provider and similarity computation; clearing it forfeits memoization but preserves all other state. The provider lifecycle remains caller-managed (Invariant 11) — `clearCaches` does not invoke any provider shutdown hook.
+
 ---
 
 ## 6. Provider Switching
@@ -640,6 +650,7 @@ These invariants are guarantees that the implementation must uphold and that con
 | `cl-spec-003` (Degradation Patterns) | Pattern thresholds operate on similarity scores produced by the embedding or trigram path |
 | `cl-spec-004` (Task Identity) | Task description embedding (section 6.1), trigram fallback (section 6.2), preparation caching (section 6.3) |
 | `cl-spec-006` (Tokenization Strategy) | Parallel provider abstraction pattern — one required method, optional batch, metadata. Cache structure (LRU, content-hash keyed). Provider switch triggers full recount/recomputation |
+| `cl-spec-007` (API Surface) | §12 defines the strict-sequential per-instance invocation contract that scopes provider call ordering. The §2.1 "Thread-safe across instances" bullet anchors the multi-instance shared-provider case to that contract. |
 | `cl-spec-015` (Instance Lifecycle) | Defines `dispose()` and the boundary between library-managed and caller-managed resources. The embedding provider falls on the caller-managed side: §3.4 of this spec and §6.5 of cl-spec-015 jointly specify that `dispose()` does not invoke provider shutdown hooks and the caller must shut down providers after `dispose()` returns. Invariant 11 is the canonical statement of this boundary. |
 
 ---

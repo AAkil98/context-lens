@@ -623,6 +623,13 @@ export interface SerializedConfig {
   hysteresisMargin: number;
   tokenCacheSize: number;
   embeddingCacheSize: number;
+  /**
+   * Maximum entries in the similarity cache at snapshot time (cl-spec-016 §5.4).
+   * Optional for forward-compat with snapshots from v0.1.0 and early v0.2.0
+   * that predate cl-spec-016 — `fromSnapshot` falls back to the default
+   * formula when the field is absent.
+   */
+  similarityCacheSize?: number;
 }
 
 export interface ProviderMetadataSnapshot {
@@ -822,4 +829,118 @@ export type IntegrationTeardown<T = unknown> = (instance: T) => void;
  */
 export interface IntegrationHandle {
   detach(): void;
+}
+
+// ─── Memory Management Domain (cl-spec-007 §8.9) ─────────────────
+
+/**
+ * Cache kinds supported by `clearCaches` and `setCacheSize`.
+ *
+ * - `'tokenizer'` — token count cache (cl-spec-006 §5)
+ * - `'embedding'` — embedding / trigram cache (cl-spec-005 §5)
+ * - `'similarity'` — pairwise similarity cache (cl-spec-002 §3.2)
+ * - `'all'` — all three (only valid for `clearCaches`; `setCacheSize` rejects
+ *   `'all'` because the three caches have different practical size ranges)
+ *
+ * @see cl-spec-007 §8.9
+ */
+export type CacheKind = 'tokenizer' | 'embedding' | 'similarity' | 'all';
+
+/**
+ * Per-cache memory snapshot returned within {@link MemoryUsage}.
+ * @see cl-spec-007 §8.9.3
+ */
+export interface CacheUsage {
+  /** Current entry count. */
+  entries: number;
+  /** Configured maximum (the value last set via setCacheSize or construction). */
+  maxEntries: number;
+  /**
+   * Approximate bytes consumed by current entries. Per-entry coefficient is
+   * documented in cl-spec-009 §6.5; expected error band ±20%.
+   */
+  estimatedBytes: number;
+}
+
+/**
+ * Memory usage snapshot returned by `ContextLens.getMemoryUsage`.
+ *
+ * Covers the three derived caches only — does not include segment content,
+ * history buffers, the continuity ledger, or other instance state.
+ *
+ * @see cl-spec-007 §8.9.3, cl-spec-009 §6.5
+ */
+export interface MemoryUsage {
+  tokenizer: CacheUsage;
+  embedding: CacheUsage;
+  similarity: CacheUsage;
+  /** Sum of the three caches' estimatedBytes. */
+  totalEstimatedBytes: number;
+}
+
+// ─── Fleet Serialization Domain (cl-spec-012 §8) ──────────────────
+
+/**
+ * Per-instance fleet-level diff state captured in a fleet snapshot.
+ * Mirrors the runtime InstanceState minus the references that cannot
+ * be serialized (`instance`, `handle`).
+ *
+ * @see cl-spec-012 §8.1.1
+ */
+export interface FleetTrackingState {
+  /** Names of patterns that were active on this instance at snapshot time. */
+  activePatterns: string[];
+  /** Per-pattern activation timestamps for duration computation on resolve. */
+  patternActivatedAt: Record<string, number>;
+  /** Wall-clock at the most recent fresh assessment of this instance through the fleet. Null if never assessed via the fleet. */
+  lastAssessedAt: number | null;
+}
+
+/**
+ * Fleet-level diff state captured in a fleet snapshot.
+ * @see cl-spec-012 §8.1.2
+ */
+export interface FleetState {
+  /** Whether the fleet is currently in degraded state (drives fleetDegraded/fleetRecovered diffing). */
+  fleetDegradedState: boolean;
+}
+
+/**
+ * One entry in {@link SerializedFleet.instances}.
+ * @see cl-spec-012 §8.1.2
+ */
+export interface SerializedFleetInstance {
+  label: string;
+  snapshot: SerializedState;
+  trackingState: FleetTrackingState;
+}
+
+/**
+ * Self-contained snapshot of a `ContextLensFleet`. Embeds one
+ * {@link SerializedState} per registered instance verbatim, plus the fleet's
+ * pattern-state cache and global diff flag.
+ *
+ * Format version is independent of {@link SerializedState.formatVersion}
+ * (cl-spec-014 §7) and the schema version (cl-spec-011 §6).
+ *
+ * @see cl-spec-012 §8
+ */
+export interface SerializedFleet {
+  formatVersion: 'context-lens-fleet-snapshot-v1';
+  timestamp: number;
+  fleetOptions: { degradationThreshold: number };
+  instances: SerializedFleetInstance[];
+  fleetState: FleetState;
+}
+
+/**
+ * Options for `ContextLensFleet.snapshot`.
+ * @see cl-spec-012 §8.1
+ */
+export interface FleetSnapshotOptions {
+  /**
+   * If false, every embedded instance snapshot is lightweight (content: null,
+   * restorable: false) per cl-spec-014 §6. Default true.
+   */
+  includeContent?: boolean;
 }

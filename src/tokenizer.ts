@@ -85,14 +85,12 @@ export class Tokenizer {
   private provider: TokenizerProvider;
   private metadata: TokenizerMetadata;
   private cache: LruCache<string, number>;
-  private readonly cacheSize: number;
 
   constructor(
     provider: TokenizerProvider | 'approximate',
     metadata: TokenizerMetadata | undefined,
     cacheSize: number,
   ) {
-    this.cacheSize = cacheSize;
     this.cache = new LruCache(cacheSize);
 
     if (provider === 'approximate') {
@@ -178,8 +176,10 @@ export class Tokenizer {
       };
     }
 
-    // Clear cache and recount all active segments
-    this.cache = new LruCache(this.cacheSize);
+    // Clear cache and recount all active segments. Keep the LruCache instance
+    // (and its current maxSize) — preserves any setCacheSize call the caller
+    // made before the provider switch (cl-spec-006 §5.6, cl-spec-007 §8.9).
+    this.cache.clear();
 
     const segments = [...deps.getActiveSegments()];
     const contents = segments.map(s => s.content);
@@ -226,12 +226,33 @@ export class Tokenizer {
   }
 
   /**
-   * Empty the token-count cache. Used by the teardown orchestrator (step 4).
-   * The tokenizer remains functional — subsequent count() calls recompute
-   * from the active provider and repopulate the cache.
-   * @see cl-spec-015 §4.1
+   * Empty the token-count cache. Used by the teardown orchestrator (step 4)
+   * and the public clearCaches API (cl-spec-007 §8.9.1). The tokenizer
+   * remains functional — subsequent count() calls recompute from the active
+   * provider and repopulate the cache.
+   * @see cl-spec-015 §4.1, cl-spec-006 §5.6
    */
   clearCache(): void {
     this.cache.clear();
+  }
+
+  /**
+   * Resize the token-count cache at runtime. Drops least-recently-used
+   * entries on shrink. Setting size to 0 disables the cache.
+   * @returns Number of entries evicted by the resize.
+   * @see cl-spec-006 §5.6, cl-spec-007 §8.9.2
+   */
+  setCacheSize(size: number): number {
+    return this.cache.resize(size);
+  }
+
+  /** Current number of cache entries — used by ContextLens.getMemoryUsage. */
+  getEntryCount(): number {
+    return this.cache.size;
+  }
+
+  /** Configured maximum entries — used by ContextLens.getMemoryUsage. */
+  getMaxEntries(): number {
+    return this.cache.maxEntries;
   }
 }

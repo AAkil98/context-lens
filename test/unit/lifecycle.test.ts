@@ -229,6 +229,7 @@ describe('READ_ONLY_METHODS', () => {
       'setTokenizer', 'setEmbeddingProvider', 'setCapacity',
       'registerPattern',
       'on', 'attachIntegration',
+      'clearCaches', 'setCacheSize',
     ];
     for (const name of mutating) {
       expect(READ_ONLY_METHODS.has(name)).toBe(false);
@@ -243,8 +244,12 @@ describe('READ_ONLY_METHODS', () => {
     }
   });
 
-  it('has size 20 (12 unchanged + 1 reconciled + 7 audit-added)', () => {
-    expect(READ_ONLY_METHODS.size).toBe(20);
+  it('has size 21 (12 unchanged + 1 reconciled + 7 audit-added + 1 Gap-6)', () => {
+    expect(READ_ONLY_METHODS.size).toBe(21);
+  });
+
+  it('contains getMemoryUsage (Gap 6 / cl-spec-007 §8.9.3)', () => {
+    expect(READ_ONLY_METHODS.has('getMemoryUsage')).toBe(true);
   });
 });
 

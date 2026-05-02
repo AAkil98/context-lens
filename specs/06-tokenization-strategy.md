@@ -4,7 +4,7 @@ title: Tokenization Strategy
 type: design
 status: complete
 created: 2026-03-25
-revised: 2026-04-29
+revised: 2026-05-01
 authors: [Akil Abderrahim, Claude Opus 4.6, Claude Opus 4.7]
 tags: [tokenization, token-counting, provider, performance, caching]
 depends_on: [cl-spec-001]
@@ -67,7 +67,7 @@ count(content: string) -> number
 **Constraints:**
 
 - **Deterministic.** The same input must always produce the same output for a given provider instance. This is load-bearing — caching (section 5) depends on it.
-- **Pure.** `count` must not mutate state, perform I/O, or have side effects. context-lens may call it from multiple threads or cache its results indefinitely.
+- **Pure.** `count` must not mutate state, perform I/O, or have side effects. context-lens may cache its results indefinitely. Per-instance call ordering is sequential (cl-spec-007 §12) — within one context-lens instance the tokenizer sees at most one in-flight call. A tokenizer object shared across multiple context-lens instances may receive concurrent calls from those instances and must remain pure under that pattern.
 - **Synchronous.** `count` returns immediately. context-lens does not support async token counting on the hot path. Providers that depend on network calls (e.g., a remote tokenization API) must handle latency internally — prefetch, local cache, or fail.
 - **Total.** `count` must return a value for any valid UTF-8 input. It must not throw on unusual content (empty strings, lone surrogates repaired to replacement characters, binary-like content). If the content cannot be meaningfully tokenized, the provider returns a best-effort estimate.
 
@@ -432,6 +432,16 @@ The cache exposes diagnostic counters for performance monitoring (cl-spec-010):
 
 A low `cacheHitRate` in steady state (after initial seed) indicates either high content churn (expected in some workloads) or a `maxCacheEntries` value that is too small for the workload. Diagnostics make this visible without requiring the caller to instrument their own cache monitoring.
 
+### 5.6 Manual Release
+
+The token count cache supports caller-initiated manual release via the API surface defined in cl-spec-007 §8.9. Three operations apply:
+
+- **`clearCaches('tokenizer')` or `clearCaches('all')`** — drops every cached count. Active segments retain their stored `tokenCount` field (the source of truth — section 4.6, count stability). Subsequent content-mutating operations recount from the active provider and repopulate the cache. The next `assess()` immediately after a clear reads the segment-stored counts and incurs no provider calls; only the next mutation that adds, updates, replaces, compacts, or splits content pays the cache miss.
+- **`setCacheSize('tokenizer', size)`** — resizes the cache at runtime. Shrinking evicts least-recently-used entries; growing leaves existing entries unchanged. `size = 0` is permitted and disables the cache (every count becomes a fresh provider call); rarely useful in practice because the cache footprint is small (~400 KB at default) and counting is cheap. cl-spec-007 §8.9.2 documents the per-cache guidance.
+- **`getMemoryUsage()`** — reports the current `entries`, `maxEntries`, and `estimatedBytes` for the token count cache. The `estimatedBytes` formula is in cl-spec-009 §6.5.
+
+Manual release does not affect the active provider, the segment-stored `tokenCount` fields, or any aggregate (`totalActiveTokens`, `pinnedTokens`, etc.). The cache is a memoization layer between the provider and the lifecycle operations that produce counts; clearing it forfeits memoization but preserves all other state. Provider lifecycle remains caller-managed (Invariant 14a) — `clearCaches` does not invoke any provider shutdown hook.
+
 ## 6. Configuration
 
 Tokenization is configured at context-lens initialization time. The configuration surface is deliberately small — two required decisions (provider and capacity) and a handful of tuning knobs — because misconfiguration here silently corrupts every downstream system that consumes token counts.
@@ -670,7 +680,7 @@ The following invariants hold at all times within the tokenization subsystem. An
 | `cl-spec-001` (Segment Model) | Defines `tokenCount` as a core segment field, computed at insertion and recomputed on mutation. Protection tiers and lifecycle operations that trigger counting. |
 | `cl-spec-002` (Quality Model) | Consumes token counts for density scoring. Quality reports include tokenizer accuracy metadata. |
 | `cl-spec-003` (Degradation Patterns) | Saturation pattern activates when utilization exceeds capacity — depends on accurate token accounting. |
-| `cl-spec-007` (API Surface) | Exposes tokenizer configuration, `setTokenizer`, `setCapacity`, and capacity report fields to the caller. |
+| `cl-spec-007` (API Surface) | Exposes tokenizer configuration, `setTokenizer`, `setCapacity`, and capacity report fields to the caller. §12 defines the strict-sequential per-instance invocation contract that scopes tokenizer call ordering — anchored in the §2.1 Pure bullet. |
 | `cl-spec-008` (Eviction Advisory) | Uses token counts for eviction candidate ranking (token cost) and reclamation targets. |
 | `cl-spec-009` (Performance Budget) | Sets latency constraints for token counting operations — informs provider selection guidance. |
 | `cl-spec-010` (Diagnostics) | Consumes cache diagnostics (hit rate, evictions, recounts) and provider metadata for observability. |

@@ -226,4 +226,82 @@ describe('LruCache', () => {
       expect(result).toEqual([]);
     });
   });
+
+  // ── resize (cl-spec-007 §8.9.2) ─────────────────────────────────
+
+  describe('resize', () => {
+    it('shrinks a full cache, evicting least-recently-used entries', () => {
+      const cache = new LruCache<string, number>(5);
+      cache.set('a', 1); cache.set('b', 2); cache.set('c', 3);
+      cache.set('d', 4); cache.set('e', 5);
+
+      const evicted = cache.resize(3);
+
+      expect(evicted).toBe(2);
+      expect(cache.size).toBe(3);
+      expect(cache.maxEntries).toBe(3);
+      // Most-recently-used three survive: e, d, c
+      expect(cache.has('a')).toBe(false);
+      expect(cache.has('b')).toBe(false);
+      expect(cache.has('c')).toBe(true);
+      expect(cache.has('d')).toBe(true);
+      expect(cache.has('e')).toBe(true);
+    });
+
+    it('grows leave existing entries unchanged and returns 0', () => {
+      const cache = new LruCache<string, number>(2);
+      cache.set('a', 1); cache.set('b', 2);
+
+      const evicted = cache.resize(10);
+
+      expect(evicted).toBe(0);
+      expect(cache.size).toBe(2);
+      expect(cache.maxEntries).toBe(10);
+      expect(cache.get('a')).toBe(1);
+      expect(cache.get('b')).toBe(2);
+    });
+
+    it('resize(0) drops every entry; subsequent set is immediate eviction', () => {
+      const cache = new LruCache<string, number>(5);
+      cache.set('a', 1); cache.set('b', 2); cache.set('c', 3);
+
+      const evicted = cache.resize(0);
+
+      expect(evicted).toBe(3);
+      expect(cache.size).toBe(0);
+      expect(cache.maxEntries).toBe(0);
+
+      cache.set('x', 99);
+      expect(cache.size).toBe(0);
+      expect(cache.get('x')).toBeUndefined();
+    });
+
+    it('resize to current size is a no-op', () => {
+      const cache = new LruCache<string, number>(3);
+      cache.set('a', 1); cache.set('b', 2); cache.set('c', 3);
+
+      const evicted = cache.resize(3);
+
+      expect(evicted).toBe(0);
+      expect(cache.size).toBe(3);
+      expect(cache.maxEntries).toBe(3);
+    });
+
+    it('preserves LRU ordering after a shrink — get() promotion survives', () => {
+      const cache = new LruCache<string, number>(5);
+      cache.set('a', 1); cache.set('b', 2); cache.set('c', 3);
+      cache.set('d', 4); cache.set('e', 5);
+      cache.get('a'); // promote 'a' to MRU; LRU order now: a, e, d, c, b
+
+      const evicted = cache.resize(2);
+
+      expect(evicted).toBe(3);
+      // The two MRU entries survive: a (just promoted) and e
+      expect(cache.has('a')).toBe(true);
+      expect(cache.has('e')).toBe(true);
+      expect(cache.has('b')).toBe(false);
+      expect(cache.has('c')).toBe(false);
+      expect(cache.has('d')).toBe(false);
+    });
+  });
 });

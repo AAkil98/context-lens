@@ -390,4 +390,75 @@ describe('ContextLens — Integration Tests', () => {
       expect(count).toBe(1);
     });
   });
+
+  // ── Memory management — long-running clear-and-rebuild round trip ─
+
+  describe('Memory management round trip (cl-spec-007 §8.9, Gap 6)', () => {
+    it('long-running clear-and-rebuild: add → assess loop → clearCaches → re-add → assess again', () => {
+      const local = new ContextLens({ capacity: 200000 });
+
+      // Phase 1: warm up. Add 30 unique segments and run a few assess
+      // cycles (each interleaved with a mutation to invalidate the quality
+      // cache). distinctContent only has 10 topics, so we suffix with the
+      // index to keep every content unique and avoid the duplicate-detection
+      // signal.
+      for (let i = 0; i < 30; i++) {
+        local.add(`${distinctContent(i)} (segment ${i})`);
+        if (i % 5 === 4) local.assess();
+      }
+      local.assess();
+
+      const beforeUsage = local.getMemoryUsage();
+      expect(beforeUsage.tokenizer.entries).toBeGreaterThan(0);
+      expect(beforeUsage.embedding.entries).toBeGreaterThan(0);
+      expect(beforeUsage.similarity.entries).toBeGreaterThan(0);
+      expect(beforeUsage.totalEstimatedBytes).toBeGreaterThan(0);
+
+      // Phase 2: clear all caches. Capture the cachesCleared event payload.
+      const events: { kind: string; entriesCleared: { tokenizer: number; embedding: number; similarity: number } }[] = [];
+      local.on('cachesCleared', (p) => events.push(p));
+
+      local.clearCaches();
+
+      const afterClear = local.getMemoryUsage();
+      expect(afterClear.tokenizer.entries).toBe(0);
+      expect(afterClear.embedding.entries).toBe(0);
+      expect(afterClear.similarity.entries).toBe(0);
+      expect(afterClear.totalEstimatedBytes).toBe(0);
+
+      expect(events).toHaveLength(1);
+      expect(events[0]!.kind).toBe('all');
+      expect(events[0]!.entriesCleared.tokenizer).toBe(beforeUsage.tokenizer.entries);
+      expect(events[0]!.entriesCleared.embedding).toBe(beforeUsage.embedding.entries);
+      expect(events[0]!.entriesCleared.similarity).toBe(beforeUsage.similarity.entries);
+
+      // Segment count is unchanged — clearCaches does not touch the segment store.
+      expect(local.getSegmentCount()).toBe(30);
+
+      // Phase 3: rebuild. A fresh add invalidates the quality report cache;
+      // the next assess() recomputes and repopulates the underlying caches.
+      local.add(`${distinctContent(30)} (segment 30)`);
+      const rebuiltReport = local.assess();
+      expect(rebuiltReport).toBeDefined();
+
+      const afterRebuild = local.getMemoryUsage();
+      // Tokenizer cache has the new segment's count (recached on the add path).
+      expect(afterRebuild.tokenizer.entries).toBeGreaterThan(0);
+      // Similarity cache repopulated by the fresh assess.
+      expect(afterRebuild.similarity.entries).toBeGreaterThan(0);
+      // Total memory back above zero.
+      expect(afterRebuild.totalEstimatedBytes).toBeGreaterThan(0);
+
+      // Phase 4: setCacheSize permanently shrinks the embedding cache;
+      // does not emit cachesCleared; subsequent assess respects the new bound.
+      const eventsBeforeResize = events.length;
+      local.setCacheSize('embedding', 8);
+      expect(events).toHaveLength(eventsBeforeResize);
+      expect(local.getMemoryUsage().embedding.maxEntries).toBe(8);
+
+      // Phase 5: dispose finishes cleanly — no pending memory issues.
+      expect(() => local.dispose()).not.toThrow();
+      expect(local.isDisposed).toBe(true);
+    });
+  });
 });
